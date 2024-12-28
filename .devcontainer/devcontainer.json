@@ -1,0 +1,16 @@
+{
+    "name": "Rust Development",
+    "build": {
+        "dockerfile": "Dockerfile"
+    },
+    "settings": {
+        "editor.formatOnSave": true,
+        "terminal.integrated.defaultProfile.linux": "bash"
+    },
+    "extensions": [
+        "rust-lang.rust-analyzer",
+        "matklad.rust-analyzer",
+        "vadimcn.vscode-lldb"
+    ],
+    "postCreateCommand": "cargo install --locked cargo-edit && rustup component add clippy rustfmt"
+}

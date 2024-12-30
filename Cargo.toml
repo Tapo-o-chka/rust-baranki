@@ -1,0 +1,20 @@
+[package]
+name = "rust-baranki"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axum = "0.7.9"
+serde = { version = "1.0.215", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.41.1", features = ["full"] }
+sea-orm = { version = "1.1.2", features = ["sqlx-sqlite", "runtime-tokio-rustls", "macros"] }
+tracing-subscriber = { version = "0.3.19", features = ["fmt", "env-filter"] }
+dotenvy = "0.15"
+argon2 = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
+jsonwebtoken = "8.3"
+rand = "0.8.5"
+
+[dev-dependencies]
+reqwest = { version = "0.11", features = ["json"] }

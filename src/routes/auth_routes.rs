@@ -97,6 +97,7 @@ pub async fn login(
         Ok(Some(model)) => match model.check_hash(&payload.password.clone()) {
             Ok(()) => {
                 let token = generate_token(&*payload.username);
+                println!("{:?}", token);
                 (
                     StatusCode::OK,
                     Json(json!({

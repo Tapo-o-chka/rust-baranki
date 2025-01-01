@@ -1,5 +1,6 @@
 use sea_orm::entity::prelude::*;
 use crate::entities::category::Entity as Category;
+use crate::entities::image::Entity as Image;
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
 #[sea_orm(table_name = "products")]
@@ -11,7 +12,7 @@ pub struct Model {
     pub price: f32,
     #[sea_orm(column_type = "Text")]
     pub description: String,
-    pub image_url: String,
+    pub image_id: i32,
     pub category_id: i32,
     #[sea_orm(default = false)]
     pub is_featured: bool,
@@ -29,6 +30,14 @@ pub enum Relation {
         on_delete = "Cascade"
     )]
     Category,
+    #[sea_orm(
+        belongs_to = "Image",
+        from = "crate::entities::product::Column::ImageId",
+        to = "crate::entities::image::Column::Id",
+        on_update = "Cascade",
+        on_delete = "Cascade"
+    )]
+    Image,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

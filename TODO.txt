@@ -1,0 +1,8 @@
+Loging middleware
+Roles
+Delete, patch category
+Auth middleware check if user exist
+Upload routes {
+    Uploading file names fancy
+    Uploading file to the db
+}

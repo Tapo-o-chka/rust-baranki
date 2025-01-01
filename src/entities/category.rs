@@ -1,4 +1,5 @@
 use sea_orm::entity::prelude::*;
+use crate::entities::image::Entity as Image;
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
 #[sea_orm(table_name = "category")]
@@ -7,7 +8,7 @@ pub struct Model {
     pub id: i32,
     #[sea_orm(unique)]
     pub name: String,
-    pub image_url: String,
+    pub image_id: i32,
     #[sea_orm(default = false)]
     pub is_featured: bool,
     #[sea_orm(default = true)]
@@ -15,6 +16,15 @@ pub struct Model {
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {}
+pub enum Relation {
+    #[sea_orm(
+        belongs_to = "Image",
+        from = "crate::entities::category::Column::ImageId",
+        to = "crate::entities::image::Column::Id",
+        on_update = "Cascade",
+        on_delete = "Cascade"
+    )]
+    Image,
+}
 
 impl ActiveModelBehavior for ActiveModel {}

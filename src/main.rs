@@ -10,7 +10,8 @@ mod middleware;
 use crate::entities::setup_schema;
 use crate::routes::{
     auth_routes::auth_routes, 
-    category_routes::category_routes, 
+    category_routes::{category_routes, admin_category_routes}, 
+    product_routes::{product_routes, admin_product_routes},
     upload_routes::upload_routes
 };
 
@@ -29,9 +30,19 @@ async fn main() {
     
     let user_routes = auth_routes(shared_db.clone()).await;
     let category_routes = category_routes(shared_db.clone()).await;
+    let admin_category_routes = admin_category_routes(shared_db.clone()).await;
+    let product_routes = product_routes(shared_db.clone()).await;
+    let admin_product_routes = admin_product_routes(shared_db.clone()).await; 
     let upload_routes = upload_routes(shared_db.clone()).await;
 
-    let app = Router::new().route("/", get(root)).nest("/", user_routes).nest("/api", category_routes).nest("/api2", upload_routes);
+    let app = Router::new()
+        .route("/", get(root))
+        .nest("/", user_routes)
+        .nest("/api", category_routes)
+        .nest("/api", product_routes)
+        .nest("/api", upload_routes)
+        .nest("/api/admin", admin_category_routes)
+        .nest("/api/admin", admin_product_routes);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
     println!("Running at {:?}", listener);

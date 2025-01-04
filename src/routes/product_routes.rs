@@ -15,56 +15,59 @@ use serde_json::json;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use crate::entities::{category, category::Entity as CategoryEntity, image, user};
+use crate::entities::{category, image, product::{self, Entity as ProductEntity}, user};
 use crate::middleware::auth::jwt_middleware;
 
 //ROUTERS
-pub async fn category_routes(db: Arc<Mutex<DatabaseConnection>>) -> Router {
+pub async fn product_routes(db: Arc<Mutex<DatabaseConnection>>) -> Router {
     Router::new()
-        .route("/category", get(get_categories))
-        .route("/category/:id", get(get_category))
+        .route("/product", get(get_products))
+        .route("/product/:id", get(get_product))
         .layer(Extension(db))
 }
 
-pub async fn admin_category_routes(db: Arc<Mutex<DatabaseConnection>>) -> Router {
+pub async fn admin_product_routes(db: Arc<Mutex<DatabaseConnection>>) -> Router {
     Router::new()
-        .route("/category", post(create_category))
+        .route("/product", post(create_product))
         .route(
-            "/category/:id",
-            get(admin_get_category)
-                .patch(patch_category)
-                .delete(delete_category),
+            "/product/:id",
+            get(admin_get_product)
+                .patch(patch_product)
+                .delete(delete_product),
         )
         .layer(Extension(db))
         .layer(middleware::from_fn(jwt_middleware))
 }
 
 //ROUTES
-async fn create_category(
+async fn create_product(
     Extension(db): Extension<Arc<Mutex<DatabaseConnection>>>,
-    Json(payload): Json<CreateCategory>,
+    Json(payload): Json<CreateProduct>,
 ) -> impl IntoResponse {
     println!(
-        "->> Called `create_category()` with payload: \n>{:?}",
+        "->> Called `create_product()` with payload: \n>{:?}",
         payload.clone()
     );
     let db = db.lock().await;
     match db.begin().await {
         Ok(txn) => match user::Entity::find_by_id(payload.image_id).one(&txn).await {
             Ok(Some(_)) => {
-                let new_category = category::ActiveModel {
+                let new_product = product::ActiveModel {
                     name: Set(payload.name),
+                    price: Set(payload.price),
+                    description: Set(payload.description),
                     image_id: Set(payload.image_id),
+                    category_id: Set(payload.category_id),
                     is_featured: Set(payload.is_featured.unwrap_or_default()),
                     is_available: Set(payload.is_available.unwrap_or_default()),
                     ..Default::default()
                 };
 
-                match category::Entity::insert(new_category).exec(&txn).await {
+                match product::Entity::insert(new_product).exec(&txn).await {
                     Ok(_) => (
                         StatusCode::CREATED,
                         Json(json!({
-                            "message": "Category created successfully"
+                            "message": "Product created successfully"
                         })),
                     ),
                     Err(err) => {
@@ -73,7 +76,7 @@ async fn create_category(
                         (
                             StatusCode::CONFLICT,
                             Json(json!({
-                                "error": "Category already exists"
+                                "error": "Product already exists"
                             })),
                         )
                     }
@@ -107,26 +110,34 @@ async fn create_category(
     }
 }
 
-async fn get_categories(
-    Query(params): Query<GetCategoriesQuery>,
+async fn get_products(
+    Query(params): Query<GetProductsQuery>,
     Extension(db): Extension<Arc<Mutex<DatabaseConnection>>>,
 ) -> impl IntoResponse {
     let db = db.lock().await;
     match db.begin().await {
         Ok(txn) => {
             let mut half_result =
-                CategoryEntity::find().filter(category::Column::IsAvailable.eq(true));
+                ProductEntity::find().filter(product::Column::IsAvailable.eq(true));
 
             if Some(true) == params.featured {
-                half_result = half_result.filter(category::Column::IsFeatured.eq(true));
+                half_result = half_result.filter(product::Column::IsFeatured.eq(true));
+            }
+
+            if let Some(min) = params.min {
+                half_result = half_result.filter(product::Column::Price.gte(min));
+            }
+
+            if let Some(max) = params.max {
+                half_result = half_result.filter(product::Column::Price.lte(max));
             }
 
             let result = half_result.all(&txn).await;
             match result {
-                Ok(categories) => {
-                    let response: Vec<PublicCategoryResponse> = categories
+                Ok(products) => {
+                    let response: Vec<PublicProductResponse> = products
                         .into_iter()
-                        .map(|categ| PublicCategoryResponse::new(categ))
+                        .map(|prod| PublicProductResponse::new(prod))
                         .collect();
                     return (StatusCode::OK, Json(response)).into_response();
                 }
@@ -153,25 +164,25 @@ async fn get_categories(
     }
 }
 
-async fn get_category(
+async fn get_product(
     Path(id): Path<i32>,
     Extension(db): Extension<Arc<Mutex<DatabaseConnection>>>,
 ) -> impl IntoResponse {
     let db = db.lock().await;
     match db.begin().await {
         Ok(txn) => {
-            let result = CategoryEntity::find_by_id(id)
-                .filter(category::Column::IsAvailable.eq(true))
+            let result = ProductEntity::find_by_id(id)
+                .filter(product::Column::IsAvailable.eq(true))
                 .one(&txn)
                 .await;
             match result {
-                Ok(Some(categor)) => {
-                    (StatusCode::OK, Json(PublicCategoryResponse::new(categor))).into_response()
+                Ok(Some(prod)) => {
+                    (StatusCode::OK, Json(PublicProductResponse::new(prod))).into_response()
                 }
                 Ok(None) => (
                     StatusCode::BAD_REQUEST,
                     Json(json!({
-                        "error": format!("No category with {} id was found.", id)
+                        "error": format!("No product with {} id was found.", id)
                     })),
                 )
                     .into_response(),
@@ -194,22 +205,23 @@ async fn get_category(
     }
 }
 
-async fn admin_get_category(
-    Query(params): Query<GetCategoryQuery>,
+async fn admin_get_product(
+    Query(params): Query<GetProductQuery>,
     Path(id): Path<i32>,
     Extension(db): Extension<Arc<Mutex<DatabaseConnection>>>,
 ) -> impl IntoResponse {
     let db = db.lock().await;
     match db.begin().await {
         Ok(txn) => {
-            let result = CategoryEntity::find_by_id(id)
+            let result = ProductEntity::find_by_id(id)
                 .one(&txn)
                 .await;
+
             match result {
-                Ok(Some(categor)) => match params.full {
-                    Some(true) => (StatusCode::OK, Json(categor)).into_response(),
+                Ok(Some(prod)) => match params.full {
+                    Some(true) => (StatusCode::OK, Json(prod)).into_response(),
                     Some(false) | None => {
-                        (StatusCode::OK, Json(PublicCategoryResponse::new(categor))).into_response()
+                        (StatusCode::OK, Json(PublicProductResponse::new(prod))).into_response()
                     }
                 },
                 Ok(None) => (
@@ -238,25 +250,34 @@ async fn admin_get_category(
     }
 }
 
-async fn patch_category(
+async fn patch_product(
     Path(id): Path<i32>,
     Extension(db): Extension<Arc<Mutex<DatabaseConnection>>>,
-    Json(payload): Json<PatchCategoryPayload>,
+    Json(payload): Json<PatchProductPayload>,
 ) -> impl IntoResponse {
     let db = db.lock().await;
     match db.begin().await {
         Ok(txn) => {
-            let result = CategoryEntity::find_by_id(id).one(&txn).await;
+            let result = ProductEntity::find_by_id(id).one(&txn).await;
             match result {
-                Ok(Some(category)) => {
-                    let mut category: category::ActiveModel = category.into();
+                Ok(Some(product)) => {
+                    let mut product: product::ActiveModel = product.into();
 
                     if let Some(name) = payload.name {
-                        category.name = Set(name);
+                        product.name = Set(name);
                     }
+
+                    if let Some(price) = payload.price {
+                        product.price = Set(price);
+                    }
+
+                    if let Some(description) = payload.description {
+                        product.description = Set(description);
+                    }
+
                     if let Some(image_id) = payload.image_id {
                         match image::Entity::find_by_id(image_id).one(&txn).await {
-                            Ok(_) => category.image_id = Set(image_id),
+                            Ok(_) => product.image_id = Set(image_id),
                             Err(_) => {
                                 return (
                                     StatusCode::BAD_REQUEST,
@@ -269,15 +290,30 @@ async fn patch_category(
                         }
                     }
 
+                    if let Some(category_id) = payload.category_id {
+                        match category::Entity::find_by_id(category_id).one(&txn).await {
+                            Ok(_) => product.category_id = Set(category_id),
+                            Err(_) => {
+                                return (
+                                    StatusCode::BAD_REQUEST,
+                                    Json(json!({
+                                        "error": format!("No category with {category_id} id was found")
+                                    })),
+                                )
+                                    .into_response();
+                            }
+                        }
+                    }
+
                     if let Some(is_featured) = payload.is_featured {
-                        category.is_featured = Set(is_featured);
+                        product.is_featured = Set(is_featured);
                     }
 
                     if let Some(is_available) = payload.is_available {
-                        category.is_available = Set(is_available);
+                        product.is_available = Set(is_available);
                     }
 
-                    let result = category.update(&txn).await;
+                    let result = product.update(&txn).await;
                     match result {
                         Ok(new_model) => {
                             let _ = txn.commit().await;
@@ -329,18 +365,18 @@ async fn patch_category(
     }
 }
 
-async fn delete_category(
+async fn delete_product(
     Path(id): Path<i32>,
     Extension(db): Extension<Arc<Mutex<DatabaseConnection>>>,
 ) -> impl IntoResponse {
     let db = db.lock().await;
     match db.begin().await {
         Ok(txn) => {
-            let result = CategoryEntity::find_by_id(id).one(&txn).await;
+            let result = ProductEntity::find_by_id(id).one(&txn).await;
             match result {
-                Ok(Some(category)) => {
-                    let category: category::ActiveModel = category.into();
-                    let result = category.delete(&txn).await;
+                Ok(Some(product)) => {
+                    let product: product::ActiveModel = product.into();
+                    let result = product.delete(&txn).await;
                     match result {
                         Ok(new_model) => {
                             let _ = txn.commit().await;
@@ -392,46 +428,60 @@ async fn delete_category(
     }
 }
 
-//Struct
+//Structs
 #[derive(Deserialize, Clone, Debug)]
-struct CreateCategory {
+struct CreateProduct {
     name: String,
+    price: f32,
+    description: String,
     image_id: i32,
+    category_id: i32,
     is_featured: Option<bool>,
     is_available: Option<bool>,
 }
 
 #[derive(Deserialize)]
-struct GetCategoryQuery {
+struct GetProductsQuery {
+    featured: Option<bool>,
+    min: Option<f32>,
+    max: Option<f32>,
+}
+
+#[derive(Deserialize)]
+struct GetProductQuery {
     full: Option<bool>,
 }
 
 #[derive(Deserialize)]
-struct GetCategoriesQuery {
-    featured: Option<bool>,
-}
-
-#[derive(Deserialize)]
-struct PatchCategoryPayload {
+struct PatchProductPayload {
     name: Option<String>,
+    price: Option<f32>,
+    description: Option<String>,
     image_id: Option<i32>,
+    category_id: Option<i32>,
     is_featured: Option<bool>,
     is_available: Option<bool>,
 }
 
 #[derive(Serialize)]
-struct PublicCategoryResponse {
+struct PublicProductResponse {
     id: i32,
     name: String,
+    price: f32,
+    description: String,
     image_id: i32,
+    category_id: i32,
 }
 
-impl PublicCategoryResponse {
-    fn new(value: category::Model) -> PublicCategoryResponse {
-        PublicCategoryResponse {
+impl PublicProductResponse {
+    fn new(value: product::Model) -> PublicProductResponse {
+        PublicProductResponse {
             id: value.id,
             name: value.name,
+            price: value.price,
+            description: value.description,
             image_id: value.image_id,
+            category_id: value.category_id
         }
     }
 }

@@ -1,8 +1,9 @@
 use sea_orm::entity::prelude::*;
+use serde::Serialize;
 use crate::entities::category::Entity as Category;
 use crate::entities::image::Entity as Image;
 
-#[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+#[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize)]
 #[sea_orm(table_name = "products")]
 pub struct Model {
     #[sea_orm(primary_key)]
@@ -26,16 +27,12 @@ pub enum Relation {
         belongs_to = "Category",
         from = "crate::entities::product::Column::CategoryId",
         to = "crate::entities::category::Column::Id",
-        on_update = "Cascade",
-        on_delete = "Cascade"
     )]
     Category,
     #[sea_orm(
         belongs_to = "Image",
         from = "crate::entities::product::Column::ImageId",
         to = "crate::entities::image::Column::Id",
-        on_update = "Cascade",
-        on_delete = "Cascade"
     )]
     Image,
 }

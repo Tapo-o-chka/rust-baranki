@@ -2,7 +2,7 @@ use axum::routing::get;
 use axum::{
     extract::{Extension, Multipart, Path},
     http::StatusCode,
-    //middleware::{self},
+    middleware::{self},
     response::IntoResponse,
     routing::post,
     Json,
@@ -19,7 +19,7 @@ use uuid::Uuid;
 const FILE_SIZE_LIMIT: usize = 8 * 1024 * 1024 * 8;
 
 use crate::entities::image;
-//use crate::middleware::auth::jwt_middleware;
+use crate::middleware::auth::jwt_middleware;
 use crate::entities::image::Entity as ImageEntity;
 
 pub async fn upload_routes(db: Arc<Mutex<DatabaseConnection>>) -> Router {
@@ -30,6 +30,7 @@ pub async fn upload_routes(db: Arc<Mutex<DatabaseConnection>>) -> Router {
             get(get_image).patch(patch_image).delete(delete_image),
         )
         .layer(Extension(db))
+        .layer(middleware::from_fn(jwt_middleware))
 }
 
 fn allowed_content_types() -> HashMap<&'static str, &'static str> {
@@ -180,10 +181,7 @@ async fn get_images(Extension(db): Extension<Arc<Mutex<DatabaseConnection>>>) ->
                 Ok(images) => {
                     let response: Vec<ImageResponse> = images
                         .into_iter()
-                        .map(|img| ImageResponse {
-                            id: img.id,
-                            file_name: img.file_name,
-                        })
+                        .map(|img| ImageResponse::new(img))
                         .collect();
                     return (StatusCode::OK, Json(response)).into_response();
                 }

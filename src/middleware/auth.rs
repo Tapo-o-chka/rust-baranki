@@ -18,7 +18,7 @@ pub async fn jwt_middleware(mut req: Request<Body>, next: Next) -> impl IntoResp
                 let token: &str = &auth_header[7..];
                 match validate_token(token) {
                     Ok(claims) => {
-                        req.extensions_mut().insert(claims.username.clone());
+                        req.extensions_mut().insert(claims.user_id);
                         return next.run(req).await;
                     }
                     Err(_) => {
@@ -59,6 +59,6 @@ struct ResponseMessage {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {
-    username: String,
+    user_id: i32,
     exp: usize,
 }

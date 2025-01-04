@@ -96,7 +96,7 @@ pub async fn login(
     match result {
         Ok(Some(model)) => match model.check_hash(&payload.password.clone()) {
             Ok(()) => {
-                let token = generate_token(&*payload.username);
+                let token = generate_token(model.id);
                 println!("{:?}", token);
                 (
                     StatusCode::OK,
@@ -148,9 +148,9 @@ pub fn hash_password(password: &str) -> Result<String, argon2::password_hash::Er
     Ok(password_hash)
 }
 
-fn generate_token(username: &str) -> String {
+fn generate_token(user_id: i32) -> String {
     let claims = Claims {
-        username: username.to_string(),
+        user_id: user_id,
         exp: (chrono::Utc::now() + chrono::Duration::days(1)).timestamp() as usize,
     };
 
@@ -185,9 +185,10 @@ pub struct JWTSend {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {
-    username: String,
+    user_id: i32,
     exp: usize,
 }
+
 
 #[derive(Debug, Serialize, Deserialize)]
 struct ResponseMessage {

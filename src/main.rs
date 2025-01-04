@@ -12,6 +12,7 @@ use crate::routes::{
     auth_routes::auth_routes, 
     category_routes::{category_routes, admin_category_routes}, 
     product_routes::{product_routes, admin_product_routes},
+    cart_routes::cart_routes,
     upload_routes::upload_routes
 };
 
@@ -34,6 +35,7 @@ async fn main() {
     let product_routes = product_routes(shared_db.clone()).await;
     let admin_product_routes = admin_product_routes(shared_db.clone()).await; 
     let upload_routes = upload_routes(shared_db.clone()).await;
+    let cart_routes = cart_routes(shared_db.clone()).await;
 
     let app = Router::new()
         .route("/", get(root))
@@ -41,6 +43,7 @@ async fn main() {
         .nest("/api", category_routes)
         .nest("/api", product_routes)
         .nest("/api", upload_routes)
+        .nest("/api", cart_routes)
         .nest("/api/admin", admin_category_routes)
         .nest("/api/admin", admin_product_routes);
 

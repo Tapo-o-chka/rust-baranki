@@ -378,9 +378,9 @@ async fn delete_product(
                     let product: product::ActiveModel = product.into();
                     let result = product.delete(&txn).await;
                     match result {
-                        Ok(new_model) => {
+                        Ok(delete_res) => {
                             let _ = txn.commit().await;
-                            println!("New model: {:?}", new_model);
+                            println!("New model: {:?}", delete_res);//?????
                             (
                                 StatusCode::OK,
                                 Json(json!({

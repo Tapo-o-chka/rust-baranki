@@ -9,8 +9,8 @@ pub struct Model {
     pub id: i32,
     #[sea_orm(indexed)]
     pub user_id: i32,
-    pub item_id: i32,
-    pub quantity: i32,
+    pub product_id: i32,
+    pub quantity: u32,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -25,7 +25,7 @@ pub enum Relation {
     User,
     #[sea_orm(
         belongs_to = "Product",
-        from = "crate::entities::cart::Column::ItemId",
+        from = "crate::entities::cart::Column::ProductId",
         to = "crate::entities::product::Column::Id",
         on_update = "Cascade",
         on_delete = "Cascade"

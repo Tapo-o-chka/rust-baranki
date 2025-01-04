@@ -2,7 +2,7 @@ Loging middleware
 Roles
 Delete, patch category
 Auth middleware check if user exist
-Upload routes {
-    Uploading file names fancy
-    Uploading file to the db
-}
+File extension table; Add relation from image to file extension;
+move all db operations to transacations;
+add regex
+finish patch routes 

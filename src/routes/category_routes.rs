@@ -1,7 +1,6 @@
 use axum::{
     extract::{Extension, Path, Query},
     http::StatusCode,
-    middleware::{self},
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
@@ -13,20 +12,19 @@ use sea_orm::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
-use tokio::sync::Mutex;
 
-use crate::entities::{category, category::Entity as CategoryEntity, image, user};
-use crate::middleware::auth::jwt_middleware;
+use crate::entities::{category, category::Entity as CategoryEntity, image, user, user::Role};
+use crate::middleware::auth::{auth_middleware, AuthState};
 
 //ROUTERS
-pub async fn category_routes(db: Arc<Mutex<DatabaseConnection>>) -> Router {
+pub async fn category_routes(db: Arc<DatabaseConnection>) -> Router {
     Router::new()
         .route("/category", get(get_categories))
         .route("/category/:id", get(get_category))
         .layer(Extension(db))
 }
 
-pub async fn admin_category_routes(db: Arc<Mutex<DatabaseConnection>>) -> Router {
+pub async fn admin_category_routes(db: Arc<DatabaseConnection>) -> Router {
     Router::new()
         .route("/category", post(create_category))
         .route(
@@ -35,20 +33,26 @@ pub async fn admin_category_routes(db: Arc<Mutex<DatabaseConnection>>) -> Router
                 .patch(patch_category)
                 .delete(delete_category),
         )
+        .layer(axum::middleware::from_fn_with_state(
+            AuthState {
+                db: db.clone(),
+                role: Role::Admin,
+            },
+            auth_middleware,
+        ))
         .layer(Extension(db))
-        .layer(middleware::from_fn(jwt_middleware))
 }
 
 //ROUTES
 async fn create_category(
-    Extension(db): Extension<Arc<Mutex<DatabaseConnection>>>,
+    Extension(db): Extension<Arc<DatabaseConnection>>,
     Json(payload): Json<CreateCategory>,
 ) -> impl IntoResponse {
     println!(
         "->> Called `create_category()` with payload: \n>{:?}",
         payload.clone()
     );
-    let db = db.lock().await;
+
     match db.begin().await {
         Ok(txn) => match user::Entity::find_by_id(payload.image_id).one(&txn).await {
             Ok(Some(_)) => {
@@ -109,9 +113,9 @@ async fn create_category(
 
 async fn get_categories(
     Query(params): Query<GetCategoriesQuery>,
-    Extension(db): Extension<Arc<Mutex<DatabaseConnection>>>,
+    Extension(db): Extension<Arc<DatabaseConnection>>,
 ) -> impl IntoResponse {
-    let db = db.lock().await;
+
     match db.begin().await {
         Ok(txn) => {
             let mut half_result =
@@ -155,9 +159,8 @@ async fn get_categories(
 
 async fn get_category(
     Path(id): Path<i32>,
-    Extension(db): Extension<Arc<Mutex<DatabaseConnection>>>,
+    Extension(db): Extension<Arc<DatabaseConnection>>,
 ) -> impl IntoResponse {
-    let db = db.lock().await;
     match db.begin().await {
         Ok(txn) => {
             let result = CategoryEntity::find_by_id(id)
@@ -197,9 +200,9 @@ async fn get_category(
 async fn admin_get_category(
     Query(params): Query<GetCategoryQuery>,
     Path(id): Path<i32>,
-    Extension(db): Extension<Arc<Mutex<DatabaseConnection>>>,
+    Extension(db): Extension<Arc<DatabaseConnection>>,
 ) -> impl IntoResponse {
-    let db = db.lock().await;
+
     match db.begin().await {
         Ok(txn) => {
             let result = CategoryEntity::find_by_id(id)
@@ -240,10 +243,10 @@ async fn admin_get_category(
 
 async fn patch_category(
     Path(id): Path<i32>,
-    Extension(db): Extension<Arc<Mutex<DatabaseConnection>>>,
+    Extension(db): Extension<Arc<DatabaseConnection>>,
     Json(payload): Json<PatchCategoryPayload>,
 ) -> impl IntoResponse {
-    let db = db.lock().await;
+
     match db.begin().await {
         Ok(txn) => {
             let result = CategoryEntity::find_by_id(id).one(&txn).await;
@@ -331,9 +334,9 @@ async fn patch_category(
 
 async fn delete_category(
     Path(id): Path<i32>,
-    Extension(db): Extension<Arc<Mutex<DatabaseConnection>>>,
+    Extension(db): Extension<Arc<DatabaseConnection>>,
 ) -> impl IntoResponse {
-    let db = db.lock().await;
+
     match db.begin().await {
         Ok(txn) => {
             let result = CategoryEntity::find_by_id(id).one(&txn).await;

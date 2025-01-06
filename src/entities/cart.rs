@@ -27,8 +27,6 @@ pub enum Relation {
         belongs_to = "Product",
         from = "crate::entities::cart::Column::ProductId",
         to = "crate::entities::product::Column::Id",
-        on_update = "Cascade",
-        on_delete = "Cascade"
     )]
     Product,
 }

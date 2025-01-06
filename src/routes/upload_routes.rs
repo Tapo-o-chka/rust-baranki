@@ -2,7 +2,6 @@ use axum::routing::get;
 use axum::{
     extract::{Extension, Multipart, Path},
     http::StatusCode,
-    middleware::{self},
     response::IntoResponse,
     routing::post,
     Json,
@@ -13,24 +12,28 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::Mutex;
 use uuid::Uuid;
 
 const FILE_SIZE_LIMIT: usize = 8 * 1024 * 1024 * 8;
 
-use crate::entities::image;
-use crate::middleware::auth::jwt_middleware;
-use crate::entities::image::Entity as ImageEntity;
+use crate::entities::{image, image::Entity as ImageEntity, user::Role};
+use crate::middleware::auth::{auth_middleware, AuthState};
 
-pub async fn upload_routes(db: Arc<Mutex<DatabaseConnection>>) -> Router {
+pub async fn upload_routes(db: Arc<DatabaseConnection>) -> Router {
     Router::new()
         .route("/image", post(upload).get(get_images))
         .route(
             "/image/:id",
             get(get_image).patch(patch_image).delete(delete_image),
         )
+        .layer(axum::middleware::from_fn_with_state(
+            AuthState {
+                db: db.clone(),
+                role: Role::Admin,
+            },
+            auth_middleware,
+        ))
         .layer(Extension(db))
-        .layer(middleware::from_fn(jwt_middleware))
 }
 
 fn allowed_content_types() -> HashMap<&'static str, &'static str> {
@@ -38,11 +41,10 @@ fn allowed_content_types() -> HashMap<&'static str, &'static str> {
 }
 
 async fn upload(
-    Extension(db): Extension<Arc<Mutex<DatabaseConnection>>>,
+    Extension(db): Extension<Arc<DatabaseConnection>>,
     mut multipart: Multipart,
 ) -> impl IntoResponse {
     println!("Called");
-    let db = db.lock().await;
     match db.begin().await {
         Ok(txn) => loop {
             match multipart.next_field().await.unwrap_or(None) {
@@ -172,8 +174,7 @@ async fn upload(
     }
 }
 
-async fn get_images(Extension(db): Extension<Arc<Mutex<DatabaseConnection>>>) -> impl IntoResponse {
-    let db = db.lock().await;
+async fn get_images(Extension(db): Extension<Arc<DatabaseConnection>>) -> impl IntoResponse {
     match db.begin().await {
         Ok(txn) => {
             let result = ImageEntity::find().all(&txn).await;
@@ -210,9 +211,8 @@ async fn get_images(Extension(db): Extension<Arc<Mutex<DatabaseConnection>>>) ->
 
 async fn get_image(
     Path(id): Path<i32>,
-    Extension(db): Extension<Arc<Mutex<DatabaseConnection>>>,
+    Extension(db): Extension<Arc<DatabaseConnection>>,
 ) -> impl IntoResponse {
-    let db = db.lock().await;
     match db.begin().await {
         Ok(txn) => {
             let result = ImageEntity::find_by_id(id).one(&txn).await;
@@ -248,10 +248,9 @@ async fn get_image(
 
 async fn patch_image(
     Path(id): Path<i32>,
-    Extension(db): Extension<Arc<Mutex<DatabaseConnection>>>,
+    Extension(db): Extension<Arc<DatabaseConnection>>,
     Json(payload): Json<PatchImagePayload>,
 ) -> impl IntoResponse {
-    let db = db.lock().await;
     match db.begin().await {
         Ok(txn) => {
             let result = ImageEntity::find_by_id(id).one(&txn).await;
@@ -313,9 +312,8 @@ async fn patch_image(
 
 async fn delete_image(
     Path(id): Path<i32>,
-    Extension(db): Extension<Arc<Mutex<DatabaseConnection>>>,
+    Extension(db): Extension<Arc<DatabaseConnection>>,
 ) -> impl IntoResponse {
-    let db = db.lock().await;
     match db.begin().await {
         Ok(txn) => {
             let result = ImageEntity::find_by_id(id).one(&txn).await;

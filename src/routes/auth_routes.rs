@@ -5,46 +5,45 @@ use argon2::{
 use axum::{
     extract::Extension,
     http::StatusCode,
-    middleware::{self},
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
 };
-use jsonwebtoken::{encode, EncodingKey, Header};
 use sea_orm::QueryFilter;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, Set};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
-use tokio::sync::Mutex;
 
-use crate::entities::{user, user::Entity as UserEntity};
-use crate::middleware::auth::jwt_middleware;
+use crate::entities::{user, user::Entity as UserEntity, user::Role};
+use crate::middleware::auth::{auth_middleware, generate_token, AuthState};
 
-const SECRET: &str = "very_secret";
-
-pub async fn auth_routes(db: Arc<Mutex<DatabaseConnection>>) -> Router {
+pub async fn auth_routes(db: Arc<DatabaseConnection>) -> Router {
     Router::new()
         .route("/register", post(register_user))
         .route("/login", post(login))
         .route(
             "/protected",
-            get(protected).layer(middleware::from_fn(jwt_middleware)),
+            get(protected).layer(axum::middleware::from_fn_with_state(
+                AuthState {
+                    db: db.clone(),
+                    role: Role::User,
+                },
+                auth_middleware,
+            )),
         )
         .layer(Extension(db))
 }
 
 // ROUTES
 pub async fn register_user(
-    Extension(db): Extension<Arc<Mutex<DatabaseConnection>>>,
+    Extension(db): Extension<Arc<DatabaseConnection>>,
     Json(payload): Json<CreateUser>,
 ) -> impl IntoResponse {
     println!(
         "->> Called `create_user()` with payload: \n>{:?}",
         payload.clone()
     );
-    let db = db.lock().await;
-
     match hash_password(&payload.password) {
         Ok(password) => {
             let new_user = user::ActiveModel {
@@ -80,14 +79,13 @@ pub async fn register_user(
 }
 
 pub async fn login(
-    Extension(db): Extension<Arc<Mutex<DatabaseConnection>>>,
+    Extension(db): Extension<Arc<DatabaseConnection>>,
     Json(payload): Json<UserLogin>,
 ) -> impl IntoResponse {
     println!(
         "->> Called `login()` with payload: \n>{:?}",
         payload.clone()
     );
-    let db = db.lock().await;
     let result = UserEntity::find()
         .filter(user::Column::Username.eq(&*payload.username))
         .one(&*db)
@@ -95,16 +93,20 @@ pub async fn login(
 
     match result {
         Ok(Some(model)) => match model.check_hash(&payload.password.clone()) {
-            Ok(()) => {
-                let token = generate_token(model.id);
-                println!("{:?}", token);
-                (
+            Ok(()) => match generate_token(model.id, model.role.to_string()).await {
+                Ok(token) => (
                     StatusCode::OK,
                     Json(json!({
                         "token": token
                     })),
-                )
-            }
+                ),
+                Err(_) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "error": "Internal server error"
+                    })),
+                ),
+            },
             Err(_) => (
                 StatusCode::UNAUTHORIZED,
                 Json(json!({
@@ -129,9 +131,12 @@ pub async fn login(
 
 async fn protected(username: Extension<String>) -> impl IntoResponse {
     //println!("{}", format!("Welcome, {:?}! This is a protected route.", username.parse::<String>().expect("Cant unwrap username")));
-    
+
     Json(ResponseMessage {
-        message: format!("Welcome, {}! This is a protected route.", username.parse::<String>().expect("Cant unwrap username")),
+        message: format!(
+            "Welcome, {}! This is a protected route.",
+            username.parse::<String>().expect("Cant unwrap username")
+        ),
     })
     .into_response()
 }
@@ -146,23 +151,6 @@ pub fn hash_password(password: &str) -> Result<String, argon2::password_hash::Er
         .to_string();
 
     Ok(password_hash)
-}
-
-fn generate_token(user_id: i32) -> String {
-    let claims = Claims {
-        user_id: user_id,
-        exp: (chrono::Utc::now() + chrono::Duration::days(1)).timestamp() as usize,
-    };
-
-    encode(
-        &Header::default(),
-        &claims,
-        &EncodingKey::from_secret(SECRET.as_ref()),
-    )
-    .unwrap_or(format!(
-        ">DEBUG PRINT FOR `fn generate token:\n> Claims: {:?}\n> Secret: {:?}",
-        &claims, &SECRET
-    ))
 }
 
 //structs
@@ -182,13 +170,6 @@ pub struct UserLogin {
 pub struct JWTSend {
     pub jwt: Option<String>,
 }
-
-#[derive(Debug, Serialize, Deserialize)]
-struct Claims {
-    user_id: i32,
-    exp: usize,
-}
-
 
 #[derive(Debug, Serialize, Deserialize)]
 struct ResponseMessage {

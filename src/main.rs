@@ -1,16 +1,16 @@
 use axum::{routing::get, Router};
 use sea_orm::{Database, DatabaseConnection};
 use std::sync::Arc;
-use tokio::sync::Mutex;
 
 mod entities;
 mod routes;
 mod middleware;
 
 use crate::entities::setup_schema;
+
 use crate::routes::{
-    auth_routes::auth_routes, 
-    category_routes::{category_routes, admin_category_routes}, 
+    auth_routes::auth_routes,
+    category_routes::{category_routes, admin_category_routes},
     product_routes::{product_routes, admin_product_routes},
     cart_routes::cart_routes,
     upload_routes::upload_routes
@@ -21,19 +21,18 @@ async fn main() {
     tracing_subscriber::fmt::init();
 
     dotenvy::dotenv().ok();
-
+    
     let database_url = std::env::var("DATABASE_URL").expect("Databse url must be set");
     let db: DatabaseConnection = Database::connect(&database_url).await.unwrap();
-
     setup_schema(&db).await;
 
-    let shared_db = Arc::new(Mutex::new(db));
-    
+    let shared_db = Arc::new(db);
+
     let user_routes = auth_routes(shared_db.clone()).await;
     let category_routes = category_routes(shared_db.clone()).await;
     let admin_category_routes = admin_category_routes(shared_db.clone()).await;
     let product_routes = product_routes(shared_db.clone()).await;
-    let admin_product_routes = admin_product_routes(shared_db.clone()).await; 
+    let admin_product_routes = admin_product_routes(shared_db.clone()).await;
     let upload_routes = upload_routes(shared_db.clone()).await;
     let cart_routes = cart_routes(shared_db.clone()).await;
 

@@ -1,7 +1,6 @@
 use axum::{
     extract::{Extension, Path, Query},
     http::StatusCode,
-    middleware::{self},
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
@@ -13,20 +12,19 @@ use sea_orm::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
-use tokio::sync::Mutex;
 
-use crate::entities::{category, image, product::{self, Entity as ProductEntity}, user};
-use crate::middleware::auth::jwt_middleware;
+use crate::entities::{category, image, product::{self, Entity as ProductEntity}, user, user::Role};
+use crate::middleware::auth::{auth_middleware, AuthState};
 
 //ROUTERS
-pub async fn product_routes(db: Arc<Mutex<DatabaseConnection>>) -> Router {
+pub async fn product_routes(db: Arc<DatabaseConnection>) -> Router {
     Router::new()
         .route("/product", get(get_products))
         .route("/product/:id", get(get_product))
         .layer(Extension(db))
 }
 
-pub async fn admin_product_routes(db: Arc<Mutex<DatabaseConnection>>) -> Router {
+pub async fn admin_product_routes(db: Arc<DatabaseConnection>) -> Router {
     Router::new()
         .route("/product", post(create_product))
         .route(
@@ -35,20 +33,25 @@ pub async fn admin_product_routes(db: Arc<Mutex<DatabaseConnection>>) -> Router 
                 .patch(patch_product)
                 .delete(delete_product),
         )
+        .layer(axum::middleware::from_fn_with_state(
+            AuthState {
+                db: db.clone(),
+                role: Role::Admin,
+            },
+            auth_middleware,
+        ))
         .layer(Extension(db))
-        .layer(middleware::from_fn(jwt_middleware))
 }
 
 //ROUTES
 async fn create_product(
-    Extension(db): Extension<Arc<Mutex<DatabaseConnection>>>,
+    Extension(db): Extension<Arc<DatabaseConnection>>,
     Json(payload): Json<CreateProduct>,
 ) -> impl IntoResponse {
     println!(
         "->> Called `create_product()` with payload: \n>{:?}",
         payload.clone()
     );
-    let db = db.lock().await;
     match db.begin().await {
         Ok(txn) => match user::Entity::find_by_id(payload.image_id).one(&txn).await {
             Ok(Some(_)) => {
@@ -112,9 +115,8 @@ async fn create_product(
 
 async fn get_products(
     Query(params): Query<GetProductsQuery>,
-    Extension(db): Extension<Arc<Mutex<DatabaseConnection>>>,
+    Extension(db): Extension<Arc<DatabaseConnection>>,
 ) -> impl IntoResponse {
-    let db = db.lock().await;
     match db.begin().await {
         Ok(txn) => {
             let mut half_result =
@@ -166,9 +168,8 @@ async fn get_products(
 
 async fn get_product(
     Path(id): Path<i32>,
-    Extension(db): Extension<Arc<Mutex<DatabaseConnection>>>,
+    Extension(db): Extension<Arc<DatabaseConnection>>,
 ) -> impl IntoResponse {
-    let db = db.lock().await;
     match db.begin().await {
         Ok(txn) => {
             let result = ProductEntity::find_by_id(id)
@@ -208,9 +209,8 @@ async fn get_product(
 async fn admin_get_product(
     Query(params): Query<GetProductQuery>,
     Path(id): Path<i32>,
-    Extension(db): Extension<Arc<Mutex<DatabaseConnection>>>,
+    Extension(db): Extension<Arc<DatabaseConnection>>,
 ) -> impl IntoResponse {
-    let db = db.lock().await;
     match db.begin().await {
         Ok(txn) => {
             let result = ProductEntity::find_by_id(id)
@@ -252,10 +252,9 @@ async fn admin_get_product(
 
 async fn patch_product(
     Path(id): Path<i32>,
-    Extension(db): Extension<Arc<Mutex<DatabaseConnection>>>,
+    Extension(db): Extension<Arc<DatabaseConnection>>,
     Json(payload): Json<PatchProductPayload>,
 ) -> impl IntoResponse {
-    let db = db.lock().await;
     match db.begin().await {
         Ok(txn) => {
             let result = ProductEntity::find_by_id(id).one(&txn).await;
@@ -367,9 +366,8 @@ async fn patch_product(
 
 async fn delete_product(
     Path(id): Path<i32>,
-    Extension(db): Extension<Arc<Mutex<DatabaseConnection>>>,
+    Extension(db): Extension<Arc<DatabaseConnection>>,
 ) -> impl IntoResponse {
-    let db = db.lock().await;
     match db.begin().await {
         Ok(txn) => {
             let result = ProductEntity::find_by_id(id).one(&txn).await;

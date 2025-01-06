@@ -1,7 +1,6 @@
 use axum::{
     extract::{Extension, Path},
     http::StatusCode,
-    middleware::{self},
     response::IntoResponse,
     routing::{get, patch},
     Json, Router,
@@ -9,20 +8,27 @@ use axum::{
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, Set, TransactionTrait
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::entities::{cart, product};
-use crate::middleware::auth::jwt_middleware;
+use crate::middleware::auth::{auth_middleware, AuthState};
+use crate::entities::user::Role;
 
 //ROUTERS
-pub async fn cart_routes(db: Arc<Mutex<DatabaseConnection>>) -> Router {
+pub async fn cart_routes(db: Arc<DatabaseConnection>) -> Router {
     Router::new()
         .route("/cart", get(get_cart).post(add_product))
         .route("/cart/:id", patch(patch_entry).delete(remove_product))
-        .layer(middleware::from_fn(jwt_middleware))
+        .layer(axum::middleware::from_fn_with_state(
+            AuthState {
+                db: db.clone(),
+                role: Role::User,
+            },
+            auth_middleware,
+        ))
         .layer(Extension(db))
 }
 

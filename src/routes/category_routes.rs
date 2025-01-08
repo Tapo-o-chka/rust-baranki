@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
 
-use crate::entities::{category, category::Entity as CategoryEntity, image, user, user::Role};
+use crate::entities::{category, category::Entity as CategoryEntity, image, user::Role};
 use crate::middleware::auth::{auth_middleware, AuthState};
 
 //ROUTERS
@@ -54,54 +54,65 @@ async fn create_category(
     );
 
     match db.begin().await {
-        Ok(txn) => match user::Entity::find_by_id(payload.image_id).one(&txn).await {
-            Ok(Some(_)) => {
-                let new_category = category::ActiveModel {
-                    name: Set(payload.name),
-                    image_id: Set(payload.image_id),
-                    is_featured: Set(payload.is_featured.unwrap_or_default()),
-                    is_available: Set(payload.is_available.unwrap_or_default()),
-                    ..Default::default()
-                };
+        Ok(txn) => {
+            if let Some(image_id) = payload.image_id {
+                match image::Entity::find_by_id(image_id).one(&txn).await {
+                    Ok(Some(_)) => {}
+                    Ok(None) => {
+                        return (
+                            StatusCode::NOT_FOUND,
+                            Json(json!({
+                                "error": format!("Image with id {} not found", image_id)
+                            })),
+                        );
+                    }
+                    Err(_) => {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({
+                                "error": "Internal server error"
+                            })),
+                        );
+                    }
+                }
+            }
 
-                match category::Entity::insert(new_category).exec(&txn).await {
+            //IF MODEL CHANGES DEFAULT VALUE -> NEED TO CHANGE HERE TOO
+            let new_category = category::ActiveModel {
+                name: Set(payload.name),
+                image_id: Set(payload.image_id),
+                is_featured: Set(payload.is_featured.unwrap_or_else(|| false)), //bad spot .unwrap_or_default() makes it not sea_orm default, but rust default to false
+                is_available: Set(payload.is_available.unwrap_or_else(|| true)), //bad spot .unwrap_or_default() makes it not sea_orm default, but rust default to false
+                ..Default::default()
+            };
+
+            match category::Entity::insert(new_category).exec(&txn).await {
+                Ok(_) => match txn.commit().await {
                     Ok(_) => (
                         StatusCode::CREATED,
                         Json(json!({
                             "message": "Category created successfully"
                         })),
                     ),
-                    Err(err) => {
-                        println!("Error: {:?}", err);
-                        let _ = txn.rollback().await;
-                        (
-                            StatusCode::CONFLICT,
-                            Json(json!({
-                                "error": "Category already exists"
-                            })),
-                        )
-                    }
+                    Err(_) => (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({
+                            "error": "Internal server error"
+                        })),
+                    ),
+                },
+                Err(err) => {
+                    println!("Error: {:?}", err);
+                    let _ = txn.rollback().await;
+                    (
+                        StatusCode::CONFLICT,
+                        Json(json!({
+                            "error": "Category already exists"
+                        })),
+                    )
                 }
             }
-            Ok(None) => {
-                let _ = txn.rollback().await;
-                (
-                    StatusCode::NOT_FOUND,
-                    Json(json!({
-                        "error": format!("Image with id {} not found", payload.image_id)
-                    })),
-                )
-            }
-            Err(_) => {
-                let _ = txn.rollback().await;
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({
-                        "error": "Internal server error"
-                    })),
-                )
-            }
-        },
+        }
         Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({
@@ -115,7 +126,7 @@ async fn get_categories(
     Query(params): Query<GetCategoriesQuery>,
     Extension(db): Extension<Arc<DatabaseConnection>>,
 ) -> impl IntoResponse {
-
+    println!("Called get categories");
     match db.begin().await {
         Ok(txn) => {
             let mut half_result =
@@ -135,6 +146,7 @@ async fn get_categories(
                     return (StatusCode::OK, Json(response)).into_response();
                 }
                 Err(_) => {
+                    println!("dudu");
                     return (
                         StatusCode::INTERNAL_SERVER_ERROR,
                         Json(json!({
@@ -161,6 +173,7 @@ async fn get_category(
     Path(id): Path<i32>,
     Extension(db): Extension<Arc<DatabaseConnection>>,
 ) -> impl IntoResponse {
+    println!("->> Called `create_category()`",);
     match db.begin().await {
         Ok(txn) => {
             let result = CategoryEntity::find_by_id(id)
@@ -172,7 +185,7 @@ async fn get_category(
                     (StatusCode::OK, Json(PublicCategoryResponse::new(categor))).into_response()
                 }
                 Ok(None) => (
-                    StatusCode::BAD_REQUEST,
+                    StatusCode::NOT_FOUND,
                     Json(json!({
                         "error": format!("No category with {} id was found.", id)
                     })),
@@ -202,12 +215,9 @@ async fn admin_get_category(
     Path(id): Path<i32>,
     Extension(db): Extension<Arc<DatabaseConnection>>,
 ) -> impl IntoResponse {
-
     match db.begin().await {
         Ok(txn) => {
-            let result = CategoryEntity::find_by_id(id)
-                .one(&txn)
-                .await;
+            let result = CategoryEntity::find_by_id(id).one(&txn).await;
             match result {
                 Ok(Some(categor)) => match params.full {
                     Some(true) => (StatusCode::OK, Json(categor)).into_response(),
@@ -244,9 +254,8 @@ async fn admin_get_category(
 async fn patch_category(
     Path(id): Path<i32>,
     Extension(db): Extension<Arc<DatabaseConnection>>,
-    Json(payload): Json<PatchCategoryPayload>,
+    Json(payload): Json<PatchCategory>,
 ) -> impl IntoResponse {
-
     match db.begin().await {
         Ok(txn) => {
             let result = CategoryEntity::find_by_id(id).one(&txn).await;
@@ -259,7 +268,7 @@ async fn patch_category(
                     }
                     if let Some(image_id) = payload.image_id {
                         match image::Entity::find_by_id(image_id).one(&txn).await {
-                            Ok(_) => category.image_id = Set(image_id),
+                            Ok(_) => category.image_id = Set(Some(image_id)),
                             Err(_) => {
                                 return (
                                     StatusCode::BAD_REQUEST,
@@ -336,7 +345,6 @@ async fn delete_category(
     Path(id): Path<i32>,
     Extension(db): Extension<Arc<DatabaseConnection>>,
 ) -> impl IntoResponse {
-
     match db.begin().await {
         Ok(txn) => {
             let result = CategoryEntity::find_by_id(id).one(&txn).await;
@@ -399,7 +407,7 @@ async fn delete_category(
 #[derive(Deserialize, Clone, Debug)]
 struct CreateCategory {
     name: String,
-    image_id: i32,
+    image_id: Option<i32>,
     is_featured: Option<bool>,
     is_available: Option<bool>,
 }
@@ -415,7 +423,7 @@ struct GetCategoriesQuery {
 }
 
 #[derive(Deserialize)]
-struct PatchCategoryPayload {
+struct PatchCategory {
     name: Option<String>,
     image_id: Option<i32>,
     is_featured: Option<bool>,
@@ -426,7 +434,7 @@ struct PatchCategoryPayload {
 struct PublicCategoryResponse {
     id: i32,
     name: String,
-    image_id: i32,
+    image_id: Option<i32>,
 }
 
 impl PublicCategoryResponse {

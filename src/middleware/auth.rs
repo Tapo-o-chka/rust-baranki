@@ -12,34 +12,44 @@ use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
 use serde::{Deserialize, Serialize};
 use std::{str::FromStr, sync::Arc};
 
-
 pub async fn auth_middleware(
     State(state): State<AuthState>,
     mut req: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
+    println!("Loaded middleware.");
     let db = state.db;
     let role = state.role;
 
+    println!("Loaded states.");
     let auth_header = req
         .headers()
         .get("Authorization")
         .and_then(|h| h.to_str().ok());
 
+    println!("Got to token");
     let token = match auth_header {
         Some(header) if header.starts_with("Bearer ") => match header.strip_prefix("Bearer ") {
             Some(token) => token,
-            _ => return Err(StatusCode::UNAUTHORIZED)
+            _ => {
+                println!("Token failed: \n{:?}", header);
+                return Err(StatusCode::UNAUTHORIZED);
+            }
         },
         _ => return Err(StatusCode::UNAUTHORIZED),
     };
 
-    let claims: Claims = validate_token(db.clone(), token, role)
-        .await
-        .map_err(|_| StatusCode::UNAUTHORIZED)?;
-
+    println!("Got token");
+    let claims: Claims = match validate_token(db.clone(), token, role).await {
+        Ok(claims) => claims,
+        Err(errr) => {
+            println!("Unun {:?}", errr);
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+    };
+    println!("Set claims: {:?}", claims);
     req.extensions_mut().insert(claims);
-
+    println!("Gone to next");
     Ok(next.run(req).await)
 }
 
@@ -112,10 +122,10 @@ pub async fn validate_token(
                 } else {
                     return Err(AuthMiddlewareError::InvalidUserOrRole);
                 }
-            },
+            }
             Ok(None) => {
                 return Err(AuthMiddlewareError::InvalidUserOrRole);
-            },
+            }
             Err(_) => {
                 return Err(AuthMiddlewareError::InternalServerError);
             }
@@ -138,7 +148,7 @@ pub enum AuthMiddlewareError {
     #[error("Failed to generate token")]
     GenerationFail,
     #[error("Internal server error")]
-    InternalServerError
+    InternalServerError,
 }
 
 fn get_secret_key() -> String {

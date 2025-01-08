@@ -4,18 +4,19 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
     routing::post,
-    Json,
-    Router,
+    Json, Router,
 };
 use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set, TransactionTrait};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::fs as tokio_fs;
 use uuid::Uuid;
 
 const FILE_SIZE_LIMIT: usize = 8 * 1024 * 1024 * 8;
 
+use crate::entities::image::FileExtension;
 use crate::entities::{image, image::Entity as ImageEntity, user::Role};
 use crate::middleware::auth::{auth_middleware, AuthState};
 
@@ -36,8 +37,8 @@ pub async fn upload_routes(db: Arc<DatabaseConnection>) -> Router {
         .layer(Extension(db))
 }
 
-fn allowed_content_types() -> HashMap<&'static str, &'static str> {
-    HashMap::from([("image/jpeg", "jpg"), ("image/png", "png")])
+fn allowed_content_types() -> HashMap<&'static str, FileExtension> {
+    HashMap::from([("image/jpeg", FileExtension::JPG), ("image/png", FileExtension::PNG)])
 }
 
 async fn upload(
@@ -105,6 +106,7 @@ async fn upload(
                     let new_image = image::ActiveModel {
                         file_name: Set(file_name.clone()),
                         path_name: Set(id.clone()),
+                        extension: Set(file_extension),
                         ..Default::default()
                     };
 
@@ -113,7 +115,7 @@ async fn upload(
                             return match std::fs::write(
                                 format!(
                                     "/workspaces/rust-baranki/uploads/{}.{}",
-                                    id, file_extension
+                                    id, file_extension.to_string()
                                 ),
                                 data,
                             ) {
@@ -246,6 +248,8 @@ async fn get_image(
     }
 }
 
+
+
 async fn patch_image(
     Path(id): Path<i32>,
     Extension(db): Extension<Arc<DatabaseConnection>>,
@@ -315,57 +319,70 @@ async fn delete_image(
     Extension(db): Extension<Arc<DatabaseConnection>>,
 ) -> impl IntoResponse {
     match db.begin().await {
-        Ok(txn) => {
-            let result = ImageEntity::find_by_id(id).one(&txn).await;
-            match result {
-                Ok(Some(image)) => {
-                    let image: image::ActiveModel = image.into();
-                    let result = image.delete(&txn).await;
-                    match result {
-                        Ok(new_model) => {
-                            let _ = txn.commit().await;
-                            println!("New model: {:?}", new_model);
-                            (
-                                StatusCode::OK,
-                                Json(json!({
-                                    "message": "Resource deleted successfully."
-                                })),
-                            )
-                                .into_response()
-                        }
-                        Err(_) => {
-                            //DB Failed / unique constraint
-                            let _ = txn.rollback().await;
-                            (
-                                StatusCode::BAD_REQUEST,
-                                Json(json!({
-                                    "error": "Failed to delete this resource"
-                                })),
-                            )
-                                .into_response()
+        Ok(txn) => match ImageEntity::find_by_id(id).one(&txn).await {
+            Ok(Some(image)) => {
+                let file_path = image.path_name.clone();
+
+                let image_active: image::ActiveModel = image.into();
+                match image_active.delete(&txn).await {
+                    Ok(_) => {
+                        match tokio_fs::remove_file(format!("./uploads/{}.jpg", &file_path)).await {
+                            Ok(_) => {
+                                let _ = txn.commit().await;
+                                (
+                                    StatusCode::OK,
+                                    Json(json!({
+                                        "message": "Resource deleted successfully."
+                                    })),
+                                )
+                                    .into_response()
+                            }
+                            Err(_) => {
+                                let _ = txn.rollback().await;
+                                (
+                                    StatusCode::BAD_REQUEST,
+                                    Json(json!({
+                                        "error": "Failed to delete this resource"
+                                    })),
+                                )
+                                    .into_response()
+                            }
                         }
                     }
+                    Err(_) => {
+                        let _ = txn.rollback().await;
+                        (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({
+                                "error": "Failed to delete this resource"
+                            })),
+                        )
+                            .into_response()
+                    }
                 }
-                Ok(None) => (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({
-                        "error": format!("No image with {} id was found.", id)
-                    })),
-                )
-                    .into_response(),
-                Err(_) => (
+            }
+            Ok(None) => (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": format!("No image with id {} was found.", id)
+                })),
+            )
+                .into_response(),
+            Err(_) => {
+                let _ = txn.rollback().await;
+                (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(json!({
-                        "error": "Internal server error."
+                        "error": "Failed to fetch image from database"
                     })),
                 )
-                    .into_response(),
+                    .into_response()
             }
-        }
+        },
         Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({
-                "error": "Internal server error"
+                "error": "Failed to start transaction"
             })),
         )
             .into_response(),

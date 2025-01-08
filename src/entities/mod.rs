@@ -5,7 +5,12 @@ pub mod category;
 pub mod image;
 //pub mod roles; 
 
-use sea_orm::{Schema, DatabaseConnection, ConnectionTrait};
+use argon2::{
+    password_hash::{rand_core::OsRng, PasswordHasher, SaltString},
+    Argon2,
+};
+use std::sync::Arc;
+use sea_orm::{ConnectionTrait, DatabaseConnection, EntityTrait, Schema, Set, TransactionTrait};
 use crate::entities::{
     cart::Entity as Crate,
     category::Entity as Category,
@@ -37,4 +42,48 @@ pub async fn setup_schema(db: &DatabaseConnection) {
     db.execute(db.get_database_backend().build(&create_picture_table))
         .await
         .expect("Failed to create picture schema");
+}
+
+pub async fn primary_settup(db: Arc<DatabaseConnection>){
+    let salt = SaltString::generate(&mut OsRng);
+    let argon2 = Argon2::default();
+    let password_hash = argon2
+        .hash_password("12345".as_bytes(), &salt)
+        .expect("Failed to hash password")
+        .to_string();
+
+    let new_admin = user::ActiveModel {
+        username: Set("admin".to_owned()),
+        password: Set(password_hash.clone()),
+        role: Set(user::Role::Admin),
+        ..Default::default()
+    };
+
+    let new_user = user::ActiveModel {
+        username: Set("user".to_owned()),
+        password: Set(password_hash),
+        role: Set(user::Role::User),
+        ..Default::default()
+    };
+
+    match db.begin().await {
+        Ok(txn) => {
+            match user::Entity::insert_many([new_user, new_admin]).exec(&txn).await {
+                Ok(_) => match txn.commit().await {
+                    Ok(_) => {
+                    },
+                    Err(_) => {
+                        panic!("Failed to pramary setup db, but function requested.");
+                    }
+                },
+                Err(_) => {
+                    let _ = txn.rollback().await;
+                    panic!("Failed to pramary setup db, but function requested.");
+                }
+            }
+        },
+        Err(_) => {
+            panic!("Failed to pramary setup db, but function requested.");
+        }
+    }
 }

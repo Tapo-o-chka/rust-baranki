@@ -15,8 +15,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
 
-use crate::entities::{user, user::Entity as UserEntity, user::Role};
 use crate::middleware::auth::{auth_middleware, generate_token, AuthState};
+use crate::{
+    entities::user::{self, Entity as UserEntity, Role},
+    middleware::auth,
+};
 
 pub async fn auth_routes(db: Arc<DatabaseConnection>) -> Router {
     Router::new()
@@ -47,8 +50,9 @@ pub async fn register_user(
     match hash_password(&payload.password) {
         Ok(password) => {
             let new_user = user::ActiveModel {
-                username: Set(payload.username.clone()),
-                password: Set(password.clone()),
+                username: Set(payload.username),
+                password: Set(password),
+                role: Set(Role::User),
                 ..Default::default()
             };
             match user::Entity::insert(new_user).exec(&*db).await {
@@ -129,16 +133,13 @@ pub async fn login(
     }
 }
 
-async fn protected(username: Extension<String>) -> impl IntoResponse {
-    //println!("{}", format!("Welcome, {:?}! This is a protected route.", username.parse::<String>().expect("Cant unwrap username")));
-
-    Json(ResponseMessage {
-        message: format!(
-            "Welcome, {}! This is a protected route.",
-            username.parse::<String>().expect("Cant unwrap username")
-        ),
-    })
-    .into_response()
+async fn protected(claims: Extension<auth::Claims>) -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        Json(json!({
+            "message": format!("User id: {}", claims.user_id)
+        })),
+    )
 }
 
 //utilities

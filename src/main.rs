@@ -6,7 +6,7 @@ mod entities;
 mod routes;
 mod middleware;
 
-use crate::entities::setup_schema;
+use crate::entities::{setup_schema, primary_settup};
 
 use crate::routes::{
     auth_routes::auth_routes,
@@ -27,6 +27,8 @@ async fn main() {
     setup_schema(&db).await;
 
     let shared_db = Arc::new(db);
+
+    primary_settup(shared_db.clone()).await;
 
     let user_routes = auth_routes(shared_db.clone()).await;
     let category_routes = category_routes(shared_db.clone()).await;

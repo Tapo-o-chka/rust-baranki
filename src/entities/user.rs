@@ -17,7 +17,10 @@ pub struct Model {
 
 impl Model {
     pub fn check_hash(&self, password: &str) -> Result<(), String> {
-        let parsed_hash = PasswordHash::new(&self.password).unwrap();
+        let parsed_hash = match PasswordHash::new(&self.password){
+            Ok(value) => value,
+            Err(err) => panic!("Error: {err}")
+        };
 
         let argon2 = Argon2::default();
         argon2

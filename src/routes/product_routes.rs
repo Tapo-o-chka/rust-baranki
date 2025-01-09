@@ -67,12 +67,20 @@ async fn create_product(
                 };
 
                 match product::Entity::insert(new_product).exec(&txn).await {
-                    Ok(_) => (
-                        StatusCode::CREATED,
-                        Json(json!({
-                            "message": "Product created successfully"
-                        })),
-                    ),
+                    Ok(_) => match txn.commit().await {
+                        Ok(_) => (
+                            StatusCode::CREATED,
+                            Json(json!({
+                                "message": "Product created successfully"
+                            })),
+                        ),
+                        Err(_) => (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({
+                                "error": "Internal server error"
+                            }))
+                        )
+                    },
                     Err(err) => {
                         println!("Error: {:?}", err);
                         let _ = txn.rollback().await;

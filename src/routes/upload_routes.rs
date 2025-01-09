@@ -1,7 +1,7 @@
 use axum::routing::get;
 use axum::{
     extract::{Extension, Multipart, Path},
-    http::StatusCode,
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     response::IntoResponse,
     routing::post,
     Json, Router,
@@ -12,6 +12,7 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::fs as tokio_fs;
+use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 
 const FILE_SIZE_LIMIT: usize = 8 * 1024 * 1024 * 8;
@@ -19,6 +20,12 @@ const FILE_SIZE_LIMIT: usize = 8 * 1024 * 1024 * 8;
 use crate::entities::image::FileExtension;
 use crate::entities::{image, image::Entity as ImageEntity, user::Role};
 use crate::middleware::auth::{auth_middleware, AuthState};
+
+pub async fn public_image_router(db: Arc<DatabaseConnection>) -> Router {
+    Router::new()
+        .route("/image/:id", get(print_image))
+        .layer(Extension(db))
+}
 
 pub async fn upload_routes(db: Arc<DatabaseConnection>) -> Router {
     Router::new()
@@ -37,15 +44,90 @@ pub async fn upload_routes(db: Arc<DatabaseConnection>) -> Router {
         .layer(Extension(db))
 }
 
+pub async fn print_image(
+    Path(id): Path<i32>,
+    Extension(db): Extension<Arc<DatabaseConnection>>,
+) -> impl IntoResponse {
+    let txn = match db.begin().await {
+        Ok(txn) => txn,
+        Err(_) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "Internal server error"
+                })),
+            ));
+        }
+    };
+
+    let path = match ImageEntity::find_by_id(id).one(&txn).await {
+        Ok(Some(model)) => {
+            "./uploads/".to_owned() + &model.path_name + "." + &model.extension.to_string()
+        }
+        Ok(None) => {
+            println!("havent found this one");
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(json!({
+                    "error": "Not found"
+                })),
+            ));
+        }
+        Err(_) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "Internal server error"
+                })),
+            ));
+        }
+    };
+    println!("Will panic after that");
+    let file = match tokio::fs::File::open(&path).await {
+        Ok(file) => file,
+        Err(_) => {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(json!({
+                    "error": "Not found"
+                })),
+            ))
+        }
+    };
+
+    let content_type = mime_guess::from_path(&path)
+        .first_raw()
+        .unwrap_or("application/octet-stream");
+
+    let stream = ReaderStream::new(file);
+    let body = axum::body::Body::from_stream(stream);
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_str(content_type)
+            .unwrap_or(HeaderValue::from_static("application/octet-stream")),
+    );
+    headers.insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_static("inline"),
+    );
+
+    Ok((headers, body))
+}
+
 fn allowed_content_types() -> HashMap<&'static str, FileExtension> {
-    HashMap::from([("image/jpeg", FileExtension::JPG), ("image/png", FileExtension::PNG)])
+    HashMap::from([
+        ("image/jpeg", FileExtension::JPG),
+        ("image/png", FileExtension::PNG),
+    ])
 }
 
 async fn upload(
     Extension(db): Extension<Arc<DatabaseConnection>>,
     mut multipart: Multipart,
 ) -> impl IntoResponse {
-    println!("Called");
+    println!("->> Called `upload()`");
     match db.begin().await {
         Ok(txn) => loop {
             match multipart.next_field().await.unwrap_or(None) {
@@ -115,7 +197,8 @@ async fn upload(
                             return match std::fs::write(
                                 format!(
                                     "/workspaces/rust-baranki/uploads/{}.{}",
-                                    id, file_extension.to_string()
+                                    id,
+                                    file_extension.to_string()
                                 ),
                                 data,
                             ) {
@@ -247,8 +330,6 @@ async fn get_image(
             .into_response(),
     }
 }
-
-
 
 async fn patch_image(
     Path(id): Path<i32>,

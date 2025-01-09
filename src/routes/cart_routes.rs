@@ -6,16 +6,16 @@ use axum::{
     Json, Router,
 };
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, Set, TransactionTrait
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, Set,
+    TransactionTrait,
 };
 use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
-use tokio::sync::Mutex;
 
-use crate::entities::{cart, product};
-use crate::middleware::auth::{auth_middleware, AuthState};
 use crate::entities::user::Role;
+use crate::entities::{cart, product};
+use crate::middleware::auth::{auth_middleware, AuthState, Claims};
 
 //ROUTERS
 pub async fn cart_routes(db: Arc<DatabaseConnection>) -> Router {
@@ -33,13 +33,13 @@ pub async fn cart_routes(db: Arc<DatabaseConnection>) -> Router {
 }
 
 async fn get_cart(
-    Extension(db): Extension<Arc<Mutex<DatabaseConnection>>>,
-    Extension(userd_id): Extension<i32>,
+    Extension(db): Extension<Arc<DatabaseConnection>>,
+    Extension(claims): Extension<Claims>,
 ) -> impl IntoResponse {
-    let db = db.lock().await;
+    let user_id = claims.user_id;
     match db.begin().await {
         Ok(txn) => match cart::Entity::find()
-            .filter(cart::Column::UserId.eq(userd_id))
+            .filter(cart::Column::UserId.eq(user_id))
             .into_json()
             .all(&txn)
             .await
@@ -64,11 +64,12 @@ async fn get_cart(
 }
 
 async fn add_product(
-    Extension(db): Extension<Arc<Mutex<DatabaseConnection>>>,
-    Extension(userd_id): Extension<i32>,
+    Extension(db): Extension<Arc<DatabaseConnection>>,
+    Extension(claims): Extension<Claims>,
     Json(payload): Json<AddProduct>,
 ) -> impl IntoResponse {
-    let db = db.lock().await;
+    println!("->> Called `add_product` with payload: {:?}", payload);
+    let user_id = claims.user_id;
     match db.begin().await {
         Ok(txn) => match product::Entity::find_by_id(payload.product_id)
             .one(&txn)
@@ -77,22 +78,34 @@ async fn add_product(
             Ok(Some(_)) => {
                 if payload.quantity > 0 {
                     let new_entry = cart::ActiveModel {
-                        user_id: Set(userd_id),
+                        user_id: Set(user_id),
                         product_id: Set(payload.product_id),
                         quantity: Set(payload.quantity),
                         ..Default::default()
                     };
                     match cart::Entity::insert(new_entry).exec(&txn).await {
                         Ok(_) => {
-                            let _ = txn.commit().await;
-                            (
-                                StatusCode::CREATED,
-                                Json(json!({
-                                    "message": "Added successfully"
-                                })),
-                            )
+                            //TODO: need to add check if same product_id exists in the cart.
+                            match txn.commit().await {
+                                Ok(_) => (
+                                    StatusCode::CREATED,
+                                    Json(json!({
+                                        "message": "Added successfully"
+                                    })),
+                                ),
+                                Err(_) => {
+                                    println!("Failed to commit");
+                                    (
+                                        StatusCode::INTERNAL_SERVER_ERROR,
+                                        Json(json!({
+                                            "error": "Internal server error"
+                                        })),
+                                    )
+                                }
+                            }
                         }
                         Err(_) => {
+                            println!("Internal server error on adding cart entry");
                             let _ = txn.rollback().await;
                             (
                                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -103,6 +116,7 @@ async fn add_product(
                         }
                     }
                 } else {
+                    println!("Error: quanity should be greater thatn 0");
                     (
                         StatusCode::BAD_REQUEST,
                         Json(json!({
@@ -111,37 +125,46 @@ async fn add_product(
                     )
                 }
             }
-            Ok(None) => (
-                StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "error": format!("No product with {} id was found", payload.product_id)
-                })),
-            ),
-            Err(_) => (
+            Ok(None) => {
+                println!("Error: no product found");
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "error": format!("No product with {} id was found", payload.product_id)
+                    })),
+                )
+            },
+            Err(_) => {
+                println!("Db search failed??");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "error": "Internal server error."
+                    })),
+                )
+            }
+        },
+        Err(_) => {
+            println!("Transaction start failed");
+            (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({
-                    "error": "Internal server error."
+                    "error": "Internal server error"
                 })),
-            ),
-        },
-        Err(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({
-                "error": "Internal server error"
-            })),
-        ),
+            )
+        }
     }
 }
 
 async fn remove_product(
     Path(id): Path<i32>,
-    Extension(userd_id): Extension<i32>,
-    Extension(db): Extension<Arc<Mutex<DatabaseConnection>>>,
+    Extension(claims): Extension<Claims>,
+    Extension(db): Extension<Arc<DatabaseConnection>>,
 ) -> impl IntoResponse {
-    let db = db.lock().await;
+    let user_id = claims.user_id;
     match db.begin().await {
         Ok(txn) => match cart::Entity::find_by_id(id)
-            .filter(cart::Column::UserId.eq(userd_id))
+            .filter(cart::Column::UserId.eq(user_id))
             .one(&txn)
             .await
         {
@@ -193,24 +216,22 @@ async fn remove_product(
 
 async fn patch_entry(
     Path(id): Path<i32>,
-    Extension(userd_id): Extension<i32>,
-    Extension(db): Extension<Arc<Mutex<DatabaseConnection>>>,
+    Extension(claims): Extension<Claims>,
+    Extension(db): Extension<Arc<DatabaseConnection>>,
     Json(payload): Json<PatchCart>,
 ) -> impl IntoResponse {
-    let db = db.lock().await;
+    let user_id = claims.user_id;
     match db.begin().await {
         Ok(txn) => match cart::Entity::find_by_id(id)
-            .filter(cart::Column::UserId.eq(userd_id))
+            .filter(cart::Column::UserId.eq(user_id))
             .one(&txn)
             .await
         {
             Ok(Some(entry)) => {
                 let mut entry: cart::ActiveModel = entry.into();
-                
+
                 let result: Result<(), DbErr> = match payload.quantity {
-                    value if value == 0 => {
-                        entry.delete(&txn).await.map(|_| ())
-                    }
+                    value if value == 0 => entry.delete(&txn).await.map(|_| ()),
                     _ => {
                         entry.quantity = Set(payload.quantity);
                         entry.update(&txn).await.map(|_| ())
@@ -260,7 +281,7 @@ async fn patch_entry(
 }
 
 //Structs
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 struct AddProduct {
     product_id: i32,
     quantity: u32, //maybe u16 is enough...
@@ -268,5 +289,5 @@ struct AddProduct {
 
 #[derive(Deserialize)]
 struct PatchCart {
-    quantity: u32
+    quantity: u32,
 }

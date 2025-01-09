@@ -13,7 +13,7 @@ use crate::routes::{
     category_routes::{category_routes, admin_category_routes},
     product_routes::{product_routes, admin_product_routes},
     cart_routes::cart_routes,
-    upload_routes::upload_routes
+    upload_routes::{upload_routes, public_image_router}
 };
 
 #[tokio::main]
@@ -37,10 +37,12 @@ async fn main() {
     let admin_product_routes = admin_product_routes(shared_db.clone()).await;
     let upload_routes = upload_routes(shared_db.clone()).await;
     let cart_routes = cart_routes(shared_db.clone()).await;
+    let public_image_router = public_image_router(shared_db.clone()).await;
 
     let app = Router::new()
         .route("/", get(root))
         .nest("/", user_routes)
+        .nest("/", public_image_router)
         .nest("/api", category_routes)
         .nest("/api", product_routes)
         .nest("/api", upload_routes)

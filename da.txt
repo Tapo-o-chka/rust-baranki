@@ -1,0 +1,5 @@
+curl -X POST http://127.0.0.1:3000/api/cart \
+-H "Authorization: Bearer eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoxLCJyb2xlIjoidXNlciIsImV4cCI6MTczNjUyODI3Nn0.C8Rwfg0L1PlUXY-lxbF3J1oarvkpVZBxs1N_t2ihHOc" \
+-H "Content-Type: application/json" \
+-d '{"product_id": 1, "quantity": 2}' \
+-v

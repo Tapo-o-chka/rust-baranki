@@ -53,72 +53,74 @@ async fn create_category(
         payload.clone()
     );
 
-    match db.begin().await {
-        Ok(txn) => {
-            if let Some(image_id) = payload.image_id {
-                match image::Entity::find_by_id(image_id).one(&txn).await {
-                    Ok(Some(_)) => {}
-                    Ok(None) => {
-                        return (
-                            StatusCode::NOT_FOUND,
-                            Json(json!({
-                                "error": format!("Image with id {} not found", image_id)
-                            })),
-                        );
-                    }
-                    Err(_) => {
-                        return (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(json!({
-                                "error": "Internal server error"
-                            })),
-                        );
-                    }
-                }
+    let txn = match db.begin().await {
+        Ok(txn) => txn,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "Internal server error"
+                })),
+            );
+        }
+    };
+
+    if let Some(image_id) = payload.image_id {
+        match image::Entity::find_by_id(image_id).one(&txn).await {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({
+                        "error": format!("Image with id {} not found", image_id)
+                    })),
+                );
             }
-
-            //IF MODEL CHANGES DEFAULT VALUE -> NEED TO CHANGE HERE TOO
-            let new_category = category::ActiveModel {
-                name: Set(payload.name),
-                image_id: Set(payload.image_id),
-                is_featured: Set(payload.is_featured.unwrap_or_else(|| false)), //bad spot .unwrap_or_default() makes it not sea_orm default, but rust default to false
-                is_available: Set(payload.is_available.unwrap_or_else(|| true)), //bad spot .unwrap_or_default() makes it not sea_orm default, but rust default to false
-                ..Default::default()
-            };
-
-            match category::Entity::insert(new_category).exec(&txn).await {
-                Ok(_) => match txn.commit().await {
-                    Ok(_) => (
-                        StatusCode::CREATED,
-                        Json(json!({
-                            "message": "Category created successfully"
-                        })),
-                    ),
-                    Err(_) => (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({
-                            "error": "Internal server error"
-                        })),
-                    ),
-                },
-                Err(err) => {
-                    println!("Error: {:?}", err);
-                    let _ = txn.rollback().await;
-                    (
-                        StatusCode::CONFLICT,
-                        Json(json!({
-                            "error": "Category already exists"
-                        })),
-                    )
-                }
+            Err(_) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "error": "Internal server error"
+                    })),
+                );
             }
         }
-        Err(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({
-                "error": "Internal server error"
-            })),
-        ),
+    }
+
+    //IF MODEL CHANGES DEFAULT VALUE -> NEED TO CHANGE HERE TOO
+    let new_category = category::ActiveModel {
+        name: Set(payload.name),
+        image_id: Set(payload.image_id),
+        is_featured: Set(payload.is_featured.unwrap_or_else(|| false)), //bad spot .unwrap_or_default() makes it not sea_orm default, but rust default to false
+        is_available: Set(payload.is_available.unwrap_or_else(|| true)), //bad spot .unwrap_or_default() makes it not sea_orm default, but rust default to false
+        ..Default::default()
+    };
+
+    match category::Entity::insert(new_category).exec(&txn).await {
+        Ok(_) => match txn.commit().await {
+            Ok(_) => (
+                StatusCode::CREATED,
+                Json(json!({
+                    "message": "Category created successfully"
+                })),
+            ),
+            Err(_) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "Internal server error"
+                })),
+            ),
+        },
+        Err(err) => {
+            println!("Error: {:?}", err);
+            let _ = txn.rollback().await;
+            (
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "error": "Category already exists"
+                })),
+            )
+        }
     }
 }
 
@@ -127,41 +129,38 @@ async fn get_categories(
     Extension(db): Extension<Arc<DatabaseConnection>>,
 ) -> impl IntoResponse {
     println!("Called get categories");
-    match db.begin().await {
-        Ok(txn) => {
-            let mut half_result =
-                CategoryEntity::find().filter(category::Column::IsAvailable.eq(true));
-
-            if Some(true) == params.featured {
-                half_result = half_result.filter(category::Column::IsFeatured.eq(true));
-            }
-
-            let result = half_result.all(&txn).await;
-            match result {
-                Ok(categories) => {
-                    let response: Vec<PublicCategoryResponse> = categories
-                        .into_iter()
-                        .map(|categ| PublicCategoryResponse::new(categ))
-                        .collect();
-                    return (StatusCode::OK, Json(response)).into_response();
-                }
-                Err(_) => {
-                    println!("dudu");
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({
-                            "error": "Internal server error."
-                        })),
-                    )
-                        .into_response();
-                }
-            }
-        }
+    let txn = match db.begin().await {
+        Ok(txn) => txn,
         Err(_) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({
                     "error": "Internal server error"
+                })),
+            )
+                .into_response();
+        }
+    };
+    let mut half_result = CategoryEntity::find().filter(category::Column::IsAvailable.eq(true));
+
+    if Some(true) == params.featured {
+        half_result = half_result.filter(category::Column::IsFeatured.eq(true));
+    }
+
+    let result = half_result.all(&txn).await;
+    match result {
+        Ok(categories) => {
+            let response: Vec<PublicCategoryResponse> = categories
+                .into_iter()
+                .map(|categ| PublicCategoryResponse::new(categ))
+                .collect();
+            return (StatusCode::OK, Json(response)).into_response();
+        }
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "Internal server error."
                 })),
             )
                 .into_response();
@@ -174,36 +173,38 @@ async fn get_category(
     Extension(db): Extension<Arc<DatabaseConnection>>,
 ) -> impl IntoResponse {
     println!("->> Called `create_category()`",);
-    match db.begin().await {
-        Ok(txn) => {
-            let result = CategoryEntity::find_by_id(id)
-                .filter(category::Column::IsAvailable.eq(true))
-                .one(&txn)
-                .await;
-            match result {
-                Ok(Some(categor)) => {
-                    (StatusCode::OK, Json(PublicCategoryResponse::new(categor))).into_response()
-                }
-                Ok(None) => (
-                    StatusCode::NOT_FOUND,
-                    Json(json!({
-                        "error": format!("No category with {} id was found.", id)
-                    })),
-                )
-                    .into_response(),
-                Err(_) => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({
-                        "error": "Internal server error."
-                    })),
-                )
-                    .into_response(),
-            }
+    let txn = match db.begin().await {
+        Ok(txn) => txn,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "Internal server error"
+                })),
+            )
+                .into_response();
         }
+    };
+
+    let result = CategoryEntity::find_by_id(id)
+        .filter(category::Column::IsAvailable.eq(true))
+        .one(&txn)
+        .await;
+    match result {
+        Ok(Some(categor)) => {
+            (StatusCode::OK, Json(PublicCategoryResponse::new(categor))).into_response()
+        }
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "error": format!("No category with {} id was found.", id)
+            })),
+        )
+            .into_response(),
         Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({
-                "error": "Internal server error"
+                "error": "Internal server error."
             })),
         )
             .into_response(),
@@ -215,36 +216,37 @@ async fn admin_get_category(
     Path(id): Path<i32>,
     Extension(db): Extension<Arc<DatabaseConnection>>,
 ) -> impl IntoResponse {
-    match db.begin().await {
-        Ok(txn) => {
-            let result = CategoryEntity::find_by_id(id).one(&txn).await;
-            match result {
-                Ok(Some(categor)) => match params.full {
-                    Some(true) => (StatusCode::OK, Json(categor)).into_response(),
-                    Some(false) | None => {
-                        (StatusCode::OK, Json(PublicCategoryResponse::new(categor))).into_response()
-                    }
-                },
-                Ok(None) => (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({
-                        "error": format!("No category with {} id was found.", id)
-                    })),
-                )
-                    .into_response(),
-                Err(_) => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({
-                        "error": "Internal server error."
-                    })),
-                )
-                    .into_response(),
-            }
+    let txn = match db.begin().await {
+        Ok(txn) => txn,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "Internal server error"
+                })),
+            )
+                .into_response();
         }
+    };
+    let result = CategoryEntity::find_by_id(id).one(&txn).await;
+    match result {
+        Ok(Some(categor)) => match params.full {
+            Some(true) => (StatusCode::OK, Json(categor)).into_response(),
+            Some(false) | None => {
+                (StatusCode::OK, Json(PublicCategoryResponse::new(categor))).into_response()
+            }
+        },
+        Ok(None) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": format!("No category with {} id was found.", id)
+            })),
+        )
+            .into_response(),
         Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({
-                "error": "Internal server error"
+                "error": "Internal server error."
             })),
         )
             .into_response(),
@@ -256,88 +258,83 @@ async fn patch_category(
     Extension(db): Extension<Arc<DatabaseConnection>>,
     Json(payload): Json<PatchCategory>,
 ) -> impl IntoResponse {
-    match db.begin().await {
-        Ok(txn) => {
-            let result = CategoryEntity::find_by_id(id).one(&txn).await;
-            match result {
-                Ok(Some(category)) => {
-                    let mut category: category::ActiveModel = category.into();
+    let txn = match db.begin().await {
+        Ok(txn) => txn,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "Internal server error"
+                })),
+            );
+        }
+    };
+    let result = CategoryEntity::find_by_id(id).one(&txn).await;
+    match result {
+        Ok(Some(category)) => {
+            let mut category: category::ActiveModel = category.into();
 
-                    if let Some(name) = payload.name {
-                        category.name = Set(name);
-                    }
-                    if let Some(image_id) = payload.image_id {
-                        match image::Entity::find_by_id(image_id).one(&txn).await {
-                            Ok(_) => category.image_id = Set(Some(image_id)),
-                            Err(_) => {
-                                return (
-                                    StatusCode::BAD_REQUEST,
-                                    Json(json!({
-                                        "error": format!("No image with {image_id} id was found")
-                                    })),
-                                )
-                                    .into_response();
-                            }
-                        }
-                    }
-
-                    if let Some(is_featured) = payload.is_featured {
-                        category.is_featured = Set(is_featured);
-                    }
-
-                    if let Some(is_available) = payload.is_available {
-                        category.is_available = Set(is_available);
-                    }
-
-                    let result = category.update(&txn).await;
-                    match result {
-                        Ok(new_model) => {
-                            let _ = txn.commit().await;
-                            println!("New model: {:?}", new_model);
-                            (
-                                StatusCode::OK,
-                                Json(json!({
-                                    "message": "Resource patched successfully."
-                                })),
-                            )
-                                .into_response()
-                        }
-                        Err(_) => {
-                            //DB Failed / unique constraint
-                            let _ = txn.rollback().await;
-                            (
-                                StatusCode::BAD_REQUEST,
-                                Json(json!({
-                                    "error": "Failed to patch this resource"
-                                })),
-                            )
-                                .into_response()
-                        }
+            if let Some(name) = payload.name {
+                category.name = Set(name);
+            }
+            if let Some(image_id) = payload.image_id {
+                match image::Entity::find_by_id(image_id).one(&txn).await {
+                    Ok(_) => category.image_id = Set(Some(image_id)),
+                    Err(_) => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({
+                                "error": format!("No image with {image_id} id was found")
+                            })),
+                        );
                     }
                 }
-                Ok(None) => (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({
-                        "error": format!("No image with {} id was found.", id)
-                    })),
-                )
-                    .into_response(),
-                Err(_) => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({
-                        "error": "Internal server error."
-                    })),
-                )
-                    .into_response(),
+            }
+
+            if let Some(is_featured) = payload.is_featured {
+                category.is_featured = Set(is_featured);
+            }
+
+            if let Some(is_available) = payload.is_available {
+                category.is_available = Set(is_available);
+            }
+
+            let result = category.update(&txn).await;
+            match result {
+                Ok(new_model) => {
+                    let _ = txn.commit().await;
+                    println!("New model: {:?}", new_model);
+                    (
+                        StatusCode::OK,
+                        Json(json!({
+                            "message": "Resource patched successfully."
+                        })),
+                    )
+                }
+                Err(_) => {
+                    //DB Failed / unique constraint
+                    let _ = txn.rollback().await;
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({
+                            "error": "Failed to patch this resource"
+                        })),
+                    )
+                }
             }
         }
+        Ok(None) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": format!("No image with {} id was found.", id)
+            })),
+        ),
         Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({
-                "error": "Internal server error"
+                "error": "Internal server error."
             })),
-        )
-            .into_response(),
+        ),
     }
 }
 
@@ -345,61 +342,57 @@ async fn delete_category(
     Path(id): Path<i32>,
     Extension(db): Extension<Arc<DatabaseConnection>>,
 ) -> impl IntoResponse {
-    match db.begin().await {
-        Ok(txn) => {
-            let result = CategoryEntity::find_by_id(id).one(&txn).await;
+    let txn = match db.begin().await {
+        Ok(txn) => txn,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "Internal server error"
+                })),
+            );
+        }
+    };
+    let result = CategoryEntity::find_by_id(id).one(&txn).await;
+    match result {
+        Ok(Some(category)) => {
+            let category: category::ActiveModel = category.into();
+            let result = category.delete(&txn).await;
             match result {
-                Ok(Some(category)) => {
-                    let category: category::ActiveModel = category.into();
-                    let result = category.delete(&txn).await;
-                    match result {
-                        Ok(new_model) => {
-                            let _ = txn.commit().await;
-                            println!("New model: {:?}", new_model);
-                            (
-                                StatusCode::OK,
-                                Json(json!({
-                                    "message": "Resource deleted successfully."
-                                })),
-                            )
-                                .into_response()
-                        }
-                        Err(_) => {
-                            //DB Failed / unique constraint
-                            let _ = txn.rollback().await;
-                            (
-                                StatusCode::BAD_REQUEST,
-                                Json(json!({
-                                    "error": "Failed to delete this resource"
-                                })),
-                            )
-                                .into_response()
-                        }
-                    }
+                Ok(new_model) => {
+                    let _ = txn.commit().await;
+                    println!("New model: {:?}", new_model);
+                    (
+                        StatusCode::OK,
+                        Json(json!({
+                            "message": "Resource deleted successfully."
+                        })),
+                    )
                 }
-                Ok(None) => (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({
-                        "error": format!("No image with {} id was found.", id)
-                    })),
-                )
-                    .into_response(),
-                Err(_) => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({
-                        "error": "Internal server error."
-                    })),
-                )
-                    .into_response(),
+                Err(_) => {
+                    //DB Failed / unique constraint
+                    let _ = txn.rollback().await;
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({
+                            "error": "Failed to delete this resource"
+                        })),
+                    )
+                }
             }
         }
+        Ok(None) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": format!("No image with {} id was found.", id)
+            })),
+        ),
         Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({
-                "error": "Internal server error"
+                "error": "Internal server error."
             })),
-        )
-            .into_response(),
+        ),
     }
 }
 

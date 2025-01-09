@@ -3,38 +3,21 @@ use argon2::{
     Argon2,
 };
 use axum::{
-    extract::Extension,
-    http::StatusCode,
-    response::IntoResponse,
-    routing::{get, post},
-    Json, Router,
+    extract::Extension, http::StatusCode, response::IntoResponse, routing::post, Json, Router,
 };
-use sea_orm::QueryFilter;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, Set};
+use sea_orm::{QueryFilter, TransactionTrait};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
 
-use crate::middleware::auth::{auth_middleware, generate_token, AuthState};
-use crate::{
-    entities::user::{self, Entity as UserEntity, Role},
-    middleware::auth,
-};
+use crate::entities::user::{self, Entity as UserEntity, Role};
+use crate::middleware::auth::generate_token;
 
 pub async fn auth_routes(db: Arc<DatabaseConnection>) -> Router {
     Router::new()
         .route("/register", post(register_user))
         .route("/login", post(login))
-        .route(
-            "/protected",
-            get(protected).layer(axum::middleware::from_fn_with_state(
-                AuthState {
-                    db: db.clone(),
-                    role: Role::User,
-                },
-                auth_middleware,
-            )),
-        )
         .layer(Extension(db))
 }
 
@@ -47,38 +30,54 @@ pub async fn register_user(
         "->> Called `create_user()` with payload: \n>{:?}",
         payload.clone()
     );
-    match hash_password(&payload.password) {
-        Ok(password) => {
-            let new_user = user::ActiveModel {
-                username: Set(payload.username),
-                password: Set(password),
-                role: Set(Role::User),
-                ..Default::default()
-            };
-            match user::Entity::insert(new_user).exec(&*db).await {
-                Ok(_) => (
-                    StatusCode::CREATED,
-                    Json(json!({
-                        "message": "User registered successfully"
-                    })),
-                ),
-                Err(err) => {
-                    println!("Error: {:?}", err);
-                    (
-                        StatusCode::CONFLICT,
-                        Json(json!({
-                            "error": "Username already exists"
-                        })),
-                    )
-                }
-            }
+
+    let txn = match db.begin().await {
+        Ok(txn) => txn,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "Internal server error"
+                })),
+            );
         }
-        Err(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
+    };
+
+    let password = match hash_password(&payload.password) {
+        Ok(password) => password,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "An internal server error occured"
+                })),
+            );
+        }
+    };
+
+    let new_user = user::ActiveModel {
+        username: Set(payload.username),
+        password: Set(password),
+        role: Set(Role::User),
+        ..Default::default()
+    };
+
+    match user::Entity::insert(new_user).exec(&txn).await {
+        Ok(_) => (
+            StatusCode::CREATED,
             Json(json!({
-                "error": "An internal server error occured"
+                "message": "User registered successfully"
             })),
         ),
+        Err(err) => {
+            println!("Error: {:?}", err);
+            (
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "error": "Username already exists"
+                })),
+            )
+        }
     }
 }
 
@@ -90,9 +89,22 @@ pub async fn login(
         "->> Called `login()` with payload: \n>{:?}",
         payload.clone()
     );
+
+    let txn = match db.begin().await {
+        Ok(txn) => txn,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "Internal server error"
+                })),
+            );
+        }
+    };
+
     let result = UserEntity::find()
         .filter(user::Column::Username.eq(&*payload.username))
-        .one(&*db)
+        .one(&txn)
         .await;
 
     match result {
@@ -131,15 +143,6 @@ pub async fn login(
             })),
         ),
     }
-}
-
-async fn protected(claims: Extension<auth::Claims>) -> impl IntoResponse {
-    (
-        StatusCode::OK,
-        Json(json!({
-            "message": format!("User id: {}", claims.user_id)
-        })),
-    )
 }
 
 //utilities

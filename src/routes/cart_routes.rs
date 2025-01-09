@@ -14,7 +14,7 @@ use serde_json::json;
 use std::sync::Arc;
 
 use crate::entities::user::Role;
-use crate::entities::{cart, product};
+use crate::entities::{cart, cart::Entity as CartEntity, product};
 use crate::middleware::auth::{auth_middleware, AuthState, Claims};
 
 //ROUTERS
@@ -37,26 +37,29 @@ async fn get_cart(
     Extension(claims): Extension<Claims>,
 ) -> impl IntoResponse {
     let user_id = claims.user_id;
-    match db.begin().await {
-        Ok(txn) => match cart::Entity::find()
-            .filter(cart::Column::UserId.eq(user_id))
-            .into_json()
-            .all(&txn)
-            .await
-        {
-            Ok(entries) => (StatusCode::OK, Json(entries)).into_response(),
-            Err(_) => (
+    let txn = match db.begin().await {
+        Ok(txn) => txn,
+        Err(_) => {
+            return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({
-                    "error": "Internal server error."
+                    "error": "Internal server error"
                 })),
             )
-                .into_response(),
-        },
+                .into_response();
+        }
+    };
+    match CartEntity::find()
+        .filter(cart::Column::UserId.eq(user_id))
+        .into_json()
+        .all(&txn)
+        .await
+    {
+        Ok(entries) => (StatusCode::OK, Json(entries)).into_response(),
         Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({
-                "error": "Internal server error"
+                "error": "Internal server error."
             })),
         )
             .into_response(),
@@ -68,45 +71,72 @@ async fn add_product(
     Extension(claims): Extension<Claims>,
     Json(payload): Json<AddProduct>,
 ) -> impl IntoResponse {
+    //too nested
     println!("->> Called `add_product` with payload: {:?}", payload);
     let user_id = claims.user_id;
-    match db.begin().await {
-        Ok(txn) => match product::Entity::find_by_id(payload.product_id)
-            .one(&txn)
-            .await
-        {
-            Ok(Some(_)) => {
-                if payload.quantity > 0 {
-                    let new_entry = cart::ActiveModel {
-                        user_id: Set(user_id),
-                        product_id: Set(payload.product_id),
-                        quantity: Set(payload.quantity),
-                        ..Default::default()
-                    };
-                    match cart::Entity::insert(new_entry).exec(&txn).await {
+    let txn = match db.begin().await {
+        Ok(txn) => txn,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "Internal server error"
+                })),
+            );
+        }
+    };
+    match product::Entity::find_by_id(payload.product_id)
+        .one(&txn)
+        .await
+    {
+        Ok(Some(_)) => {
+            if payload.quantity > 0 {
+                if let Ok(Some(entry)) = CartEntity::find()
+                    .filter(cart::Column::ProductId.eq(payload.product_id))
+                    .filter(cart::Column::UserId.eq(user_id))
+                    .one(&txn)
+                    .await
+                {
+                    let mut entry: cart::ActiveModel = entry.into();
+                    entry.quantity = Set(entry.quantity.unwrap() + payload.quantity);
+                    let result = entry.update(&txn).await.map(|_| ());
+                    match result {
                         Ok(_) => {
-                            //TODO: need to add check if same product_id exists in the cart.
-                            match txn.commit().await {
-                                Ok(_) => (
-                                    StatusCode::CREATED,
-                                    Json(json!({
-                                        "message": "Added successfully"
-                                    })),
-                                ),
-                                Err(_) => {
-                                    println!("Failed to commit");
-                                    (
-                                        StatusCode::INTERNAL_SERVER_ERROR,
-                                        Json(json!({
-                                            "error": "Internal server error"
-                                        })),
-                                    )
-                                }
-                            }
+                            let _ = txn.commit().await;
+                            return (
+                                StatusCode::OK,
+                                Json(json!({
+                                    "message": "Resource patched successfully"
+                                })),
+                            );
                         }
                         Err(_) => {
-                            println!("Internal server error on adding cart entry");
                             let _ = txn.rollback().await;
+                            return (
+                                StatusCode::BAD_REQUEST,
+                                Json(json!({
+                                    "error": "Failed to patch this resource"
+                                })),
+                            );
+                        }
+                    };
+                };
+                let new_entry = cart::ActiveModel {
+                    user_id: Set(user_id),
+                    product_id: Set(payload.product_id),
+                    quantity: Set(payload.quantity),
+                    ..Default::default()
+                };
+                match CartEntity::insert(new_entry).exec(&txn).await {
+                    Ok(_) => match txn.commit().await {
+                        Ok(_) => (
+                            StatusCode::CREATED,
+                            Json(json!({
+                                "message": "Added successfully"
+                            })),
+                        ),
+                        Err(_) => {
+                            println!("Failed to commit");
                             (
                                 StatusCode::INTERNAL_SERVER_ERROR,
                                 Json(json!({
@@ -114,42 +144,43 @@ async fn add_product(
                                 })),
                             )
                         }
+                    },
+                    Err(_) => {
+                        println!("Internal server error on adding cart entry");
+                        let _ = txn.rollback().await;
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({
+                                "error": "Internal server error"
+                            })),
+                        )
                     }
-                } else {
-                    println!("Error: quanity should be greater thatn 0");
-                    (
-                        StatusCode::BAD_REQUEST,
-                        Json(json!({
-                            "error": "Quantity should be greater than 0"
-                        })),
-                    )
                 }
-            }
-            Ok(None) => {
-                println!("Error: no product found");
+            } else {
+                println!("Error: quanity should be greater thatn 0");
                 (
                     StatusCode::BAD_REQUEST,
                     Json(json!({
-                        "error": format!("No product with {} id was found", payload.product_id)
-                    })),
-                )
-            },
-            Err(_) => {
-                println!("Db search failed??");
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({
-                        "error": "Internal server error."
+                        "error": "Quantity should be greater than 0"
                     })),
                 )
             }
-        },
+        }
+        Ok(None) => {
+            println!("Error: no product found");
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": format!("No product with {} id was found", payload.product_id)
+                })),
+            )
+        }
         Err(_) => {
-            println!("Transaction start failed");
+            println!("Db search failed??");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({
-                    "error": "Internal server error"
+                    "error": "Internal server error."
                 })),
             )
         }
@@ -162,53 +193,57 @@ async fn remove_product(
     Extension(db): Extension<Arc<DatabaseConnection>>,
 ) -> impl IntoResponse {
     let user_id = claims.user_id;
-    match db.begin().await {
-        Ok(txn) => match cart::Entity::find_by_id(id)
-            .filter(cart::Column::UserId.eq(user_id))
-            .one(&txn)
-            .await
-        {
-            Ok(Some(entry)) => {
-                let entry: cart::ActiveModel = entry.into();
-                let result = entry.delete(&txn).await;
-                match result {
-                    Ok(_) => {
-                        let _ = txn.commit().await;
-                        (
-                            StatusCode::OK,
-                            Json(json!({
-                                "message": "Resource deleted successfully"
-                            })),
-                        )
-                    }
-                    Err(_) => {
-                        let _ = txn.rollback().await;
-                        (
-                            StatusCode::BAD_REQUEST,
-                            Json(json!({
-                                "error": "Failed to delete this resource"
-                            })),
-                        )
-                    }
-                }
-            }
-            Ok(None) => (
-                StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "error": format!("No related entry with {} id was found.", id)
-                })),
-            ),
-            Err(_) => (
+    let txn = match db.begin().await {
+        Ok(txn) => txn,
+        Err(_) => {
+            return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({
-                    "error": "Internal server error."
+                    "error": "Internal server error"
                 })),
-            ),
-        },
+            );
+        }
+    };
+
+    match CartEntity::find_by_id(id)
+        .filter(cart::Column::UserId.eq(user_id))
+        .one(&txn)
+        .await
+    {
+        Ok(Some(entry)) => {
+            let entry: cart::ActiveModel = entry.into();
+            let result = entry.delete(&txn).await;
+            match result {
+                Ok(_) => {
+                    let _ = txn.commit().await;
+                    (
+                        StatusCode::OK,
+                        Json(json!({
+                            "message": "Resource deleted successfully"
+                        })),
+                    )
+                }
+                Err(_) => {
+                    let _ = txn.rollback().await;
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({
+                            "error": "Failed to delete this resource"
+                        })),
+                    )
+                }
+            }
+        }
+        Ok(None) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": format!("No related entry with {} id was found.", id)
+            })),
+        ),
         Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({
-                "error": "Internal server error"
+                "error": "Internal server error."
             })),
         ),
     }
@@ -221,60 +256,64 @@ async fn patch_entry(
     Json(payload): Json<PatchCart>,
 ) -> impl IntoResponse {
     let user_id = claims.user_id;
-    match db.begin().await {
-        Ok(txn) => match cart::Entity::find_by_id(id)
-            .filter(cart::Column::UserId.eq(user_id))
-            .one(&txn)
-            .await
-        {
-            Ok(Some(entry)) => {
-                let mut entry: cart::ActiveModel = entry.into();
-
-                let result: Result<(), DbErr> = match payload.quantity {
-                    value if value == 0 => entry.delete(&txn).await.map(|_| ()),
-                    _ => {
-                        entry.quantity = Set(payload.quantity);
-                        entry.update(&txn).await.map(|_| ())
-                    }
-                };
-                match result {
-                    Ok(_) => {
-                        let _ = txn.commit().await;
-                        (
-                            StatusCode::OK,
-                            Json(json!({
-                                "message": "Resource patched successfully"
-                            })),
-                        )
-                    }
-                    Err(_) => {
-                        let _ = txn.rollback().await;
-                        (
-                            StatusCode::BAD_REQUEST,
-                            Json(json!({
-                                "error": "Failed to patch this resource"
-                            })),
-                        )
-                    }
-                }
-            }
-            Ok(None) => (
-                StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "error": format!("No related entry with {} id was found.", id)
-                })),
-            ),
-            Err(_) => (
+    let txn = match db.begin().await {
+        Ok(txn) => txn,
+        Err(_) => {
+            return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({
-                    "error": "Internal server error."
+                    "error": "Internal server error"
                 })),
-            ),
-        },
+            );
+        }
+    };
+
+    match CartEntity::find_by_id(id)
+        .filter(cart::Column::UserId.eq(user_id))
+        .one(&txn)
+        .await
+    {
+        Ok(Some(entry)) => {
+            let mut entry: cart::ActiveModel = entry.into();
+
+            let result: Result<(), DbErr> = match payload.quantity {
+                value if value == 0 => entry.delete(&txn).await.map(|_| ()),
+                _ => {
+                    entry.quantity = Set(payload.quantity);
+                    entry.update(&txn).await.map(|_| ())
+                }
+            };
+            match result {
+                Ok(_) => {
+                    let _ = txn.commit().await;
+                    (
+                        StatusCode::OK,
+                        Json(json!({
+                            "message": "Resource patched successfully"
+                        })),
+                    )
+                }
+                Err(_) => {
+                    let _ = txn.rollback().await;
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({
+                            "error": "Failed to patch this resource"
+                        })),
+                    )
+                }
+            }
+        }
+        Ok(None) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": format!("No related entry with {} id was found.", id)
+            })),
+        ),
         Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({
-                "error": "Internal server error"
+                "error": "Internal server error."
             })),
         ),
     }

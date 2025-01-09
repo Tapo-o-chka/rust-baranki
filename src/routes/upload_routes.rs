@@ -128,165 +128,168 @@ async fn upload(
     mut multipart: Multipart,
 ) -> impl IntoResponse {
     println!("->> Called `upload()`");
-    match db.begin().await {
-        Ok(txn) => loop {
-            match multipart.next_field().await.unwrap_or(None) {
-                Some(field) => {
-                    let content_type = match field.content_type() {
-                        Some(content_type) => content_type.to_owned(),
-                        None => {
-                            return (
-                                StatusCode::BAD_REQUEST,
-                                Json(json!({"error": "Content type is not set."})),
-                            );
-                        }
-                    };
-
-                    let file_extension = match allowed_content_types().get(content_type.as_str()) {
-                        Some(&ext) => ext.to_owned(),
-                        None => {
-                            return (
-                                StatusCode::BAD_REQUEST,
-                                Json(json!({"error": "Unsupported content type."})),
-                            );
-                        }
-                    };
-
-                    let file_name = match field.name() {
-                        Some(name) => name.to_owned(),
-                        None => {
-                            return (
-                                StatusCode::BAD_REQUEST,
-                                Json(json!({
-                                    "error": "File name is not set."
-                                })),
-                            );
-                        }
-                    };
-
-                    let data = match field.bytes().await {
-                        Ok(data) => data,
-                        Err(_) => {
-                            return (
-                                StatusCode::INTERNAL_SERVER_ERROR,
-                                Json(json!({
-                                    "error": "Failed to read file bytes."
-                                })),
-                            );
-                        }
-                    };
-                    if data.len() > FILE_SIZE_LIMIT {
-                        return (
-                            StatusCode::PAYLOAD_TOO_LARGE,
-                            Json(json!({
-                                "error": "Payload too large."
-                            })),
-                        );
-                    }
-
-                    let id = Uuid::new_v4().to_string();
-                    let new_image = image::ActiveModel {
-                        file_name: Set(file_name.clone()),
-                        path_name: Set(id.clone()),
-                        extension: Set(file_extension),
-                        ..Default::default()
-                    };
-
-                    match ImageEntity::insert(new_image).exec(&txn).await {
-                        Ok(_) => {
-                            return match std::fs::write(
-                                format!(
-                                    "/workspaces/rust-baranki/uploads/{}.{}",
-                                    id,
-                                    file_extension.to_string()
-                                ),
-                                data,
-                            ) {
-                                Ok(_) => match txn.commit().await {
-                                    Ok(_) => (
-                                        StatusCode::CREATED,
-                                        Json(json!({
-                                            "message": "File uploaded successfully."
-                                        })),
-                                    ),
-                                    Err(_) => (
-                                        StatusCode::INTERNAL_SERVER_ERROR,
-                                        Json(json!({
-                                            "error": "Internal server error."
-                                        })),
-                                    ),
-                                },
-                                Err(err) => {
-                                    println!("> Error: 'Failed to upload file to the server'.\n> Exactly: {:?}", err);
-                                    let _ = txn.rollback().await;
-                                    (
-                                        StatusCode::INTERNAL_SERVER_ERROR,
-                                        Json(json!({
-                                            "error": "Failed to upload file to the server"
-                                        })),
-                                    )
-                                }
-                            };
-                        }
-                        Err(err) => {
-                            println!("Error: {:?}", err);
-                            let _ = txn.rollback().await;
-                            return (
-                                StatusCode::CONFLICT,
-                                Json(json!({
-                                    "error": "Image already exists"
-                                })),
-                            );
-                        }
-                    }
-                }
-                None => {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(json!({
-                            "error": "idk what went wrong"
-                        })),
-                    )
-                }
-            }
-        },
-        Err(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({
-                "error": "Internal server error"
-            })),
-        ),
-    }
-}
-
-async fn get_images(Extension(db): Extension<Arc<DatabaseConnection>>) -> impl IntoResponse {
-    match db.begin().await {
-        Ok(txn) => {
-            let result = ImageEntity::find().all(&txn).await;
-            match result {
-                Ok(images) => {
-                    let response: Vec<ImageResponse> = images
-                        .into_iter()
-                        .map(|img| ImageResponse::new(img))
-                        .collect();
-                    return (StatusCode::OK, Json(response)).into_response();
-                }
-                Err(_) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({
-                            "error": "Internal server error."
-                        })),
-                    )
-                        .into_response();
-                }
-            }
-        }
+    let txn = match db.begin().await {
+        Ok(txn) => txn,
         Err(_) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({
                     "error": "Internal server error"
+                })),
+            );
+        }
+    };
+    loop {
+        match multipart.next_field().await.unwrap_or(None) {
+            Some(field) => {
+                let content_type = match field.content_type() {
+                    Some(content_type) => content_type.to_owned(),
+                    None => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({"error": "Content type is not set."})),
+                        );
+                    }
+                };
+
+                let file_extension = match allowed_content_types().get(content_type.as_str()) {
+                    Some(&ext) => ext.to_owned(),
+                    None => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({"error": "Unsupported content type."})),
+                        );
+                    }
+                };
+
+                let file_name = match field.name() {
+                    Some(name) => name.to_owned(),
+                    None => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({
+                                "error": "File name is not set."
+                            })),
+                        );
+                    }
+                };
+
+                let data = match field.bytes().await {
+                    Ok(data) => data,
+                    Err(_) => {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({
+                                "error": "Failed to read file bytes."
+                            })),
+                        );
+                    }
+                };
+                if data.len() > FILE_SIZE_LIMIT {
+                    return (
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        Json(json!({
+                            "error": "Payload too large."
+                        })),
+                    );
+                }
+
+                let id = Uuid::new_v4().to_string();
+                let new_image = image::ActiveModel {
+                    file_name: Set(file_name.clone()),
+                    path_name: Set(id.clone()),
+                    extension: Set(file_extension),
+                    ..Default::default()
+                };
+
+                match ImageEntity::insert(new_image).exec(&txn).await {
+                    Ok(_) => {
+                        return match std::fs::write(
+                            format!(
+                                "/workspaces/rust-baranki/uploads/{}.{}",
+                                id,
+                                file_extension.to_string()
+                            ),
+                            data,
+                        ) {
+                            Ok(_) => match txn.commit().await {
+                                Ok(_) => (
+                                    StatusCode::CREATED,
+                                    Json(json!({
+                                        "message": "File uploaded successfully."
+                                    })),
+                                ),
+                                Err(_) => (
+                                    StatusCode::INTERNAL_SERVER_ERROR,
+                                    Json(json!({
+                                        "error": "Internal server error."
+                                    })),
+                                ),
+                            },
+                            Err(err) => {
+                                println!("> Error: 'Failed to upload file to the server'.\n> Exactly: {:?}", err);
+                                let _ = txn.rollback().await;
+                                (
+                                    StatusCode::INTERNAL_SERVER_ERROR,
+                                    Json(json!({
+                                        "error": "Failed to upload file to the server"
+                                    })),
+                                )
+                            }
+                        };
+                    }
+                    Err(err) => {
+                        println!("Error: {:?}", err);
+                        let _ = txn.rollback().await;
+                        return (
+                            StatusCode::CONFLICT,
+                            Json(json!({
+                                "error": "Image already exists"
+                            })),
+                        );
+                    }
+                }
+            }
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "error": "idk what went wrong"
+                    })),
+                )
+            }
+        }
+    }
+}
+
+async fn get_images(Extension(db): Extension<Arc<DatabaseConnection>>) -> impl IntoResponse {
+    let txn = match db.begin().await {
+        Ok(txn) => txn,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "Internal server error"
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let result = ImageEntity::find().all(&txn).await;
+    match result {
+        Ok(images) => {
+            let response: Vec<ImageResponse> = images
+                .into_iter()
+                .map(|img| ImageResponse::new(img))
+                .collect();
+            return (StatusCode::OK, Json(response)).into_response();
+        }
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "Internal server error."
                 })),
             )
                 .into_response();
@@ -298,33 +301,35 @@ async fn get_image(
     Path(id): Path<i32>,
     Extension(db): Extension<Arc<DatabaseConnection>>,
 ) -> impl IntoResponse {
-    match db.begin().await {
-        Ok(txn) => {
-            let result = ImageEntity::find_by_id(id).one(&txn).await;
-            match result {
-                Ok(Some(image)) => {
-                    (StatusCode::OK, Json(ImageResponse::new(image))).into_response()
-                }
-                Ok(None) => (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({
-                        "error": format!("No image with {} id was found.", id)
-                    })),
-                )
-                    .into_response(),
-                Err(_) => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({
-                        "error": "Internal server error."
-                    })),
-                )
-                    .into_response(),
-            }
+    let txn = match db.begin().await {
+        Ok(txn) => txn,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "Internal server error"
+                })),
+            )
+                .into_response();
         }
+    };
+
+    let result = ImageEntity::find_by_id(id).one(&txn).await;
+    match result {
+        Ok(Some(image)) => {
+            (StatusCode::OK, Json(ImageResponse::new(image))).into_response()
+        }
+        Ok(None) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": format!("No image with {} id was found.", id)
+            })),
+        )
+            .into_response(),
         Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({
-                "error": "Internal server error"
+                "error": "Internal server error."
             })),
         )
             .into_response(),
@@ -336,62 +341,59 @@ async fn patch_image(
     Extension(db): Extension<Arc<DatabaseConnection>>,
     Json(payload): Json<PatchImagePayload>,
 ) -> impl IntoResponse {
-    match db.begin().await {
-        Ok(txn) => {
-            let result = ImageEntity::find_by_id(id).one(&txn).await;
+    let txn = match db.begin().await {
+        Ok(txn) => txn,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "Internal server error"
+                })),
+            );
+        }
+    };
+
+    let result = ImageEntity::find_by_id(id).one(&txn).await;
+    match result {
+        Ok(Some(image)) => {
+            let mut image: image::ActiveModel = image.into();
+            image.file_name = Set(payload.file_name);
+            let result = image.update(&txn).await;
             match result {
-                Ok(Some(image)) => {
-                    let mut image: image::ActiveModel = image.into();
-                    image.file_name = Set(payload.file_name);
-                    let result = image.update(&txn).await;
-                    match result {
-                        Ok(new_model) => {
-                            let _ = txn.commit().await;
-                            println!("New model: {:?}", new_model);
-                            (
-                                StatusCode::OK,
-                                Json(json!({
-                                    "message": "Resource patched successfully."
-                                })),
-                            )
-                                .into_response()
-                        }
-                        Err(_) => {
-                            //DB Failed / unique constraint
-                            let _ = txn.rollback().await;
-                            (
-                                StatusCode::BAD_REQUEST,
-                                Json(json!({
-                                    "error": "Failed to patch this resource"
-                                })),
-                            )
-                                .into_response()
-                        }
-                    }
+                Ok(new_model) => {
+                    let _ = txn.commit().await;
+                    println!("New model: {:?}", new_model);
+                    (
+                        StatusCode::OK,
+                        Json(json!({
+                            "message": "Resource patched successfully."
+                        })),
+                    )
                 }
-                Ok(None) => (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({
-                        "error": format!("No image with {} id was found.", id)
-                    })),
-                )
-                    .into_response(),
-                Err(_) => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({
-                        "error": "Internal server error."
-                    })),
-                )
-                    .into_response(),
+                Err(_) => {
+                    //DB Failed / unique constraint
+                    let _ = txn.rollback().await;
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({
+                            "error": "Failed to patch this resource"
+                        })),
+                    )
+                }
             }
         }
+        Ok(None) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": format!("No image with {} id was found.", id)
+            })),
+        ),
         Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({
-                "error": "Internal server error"
+                "error": "Internal server error."
             })),
-        )
-            .into_response(),
+        ),
     }
 }
 
@@ -399,76 +401,74 @@ async fn delete_image(
     Path(id): Path<i32>,
     Extension(db): Extension<Arc<DatabaseConnection>>,
 ) -> impl IntoResponse {
-    match db.begin().await {
-        Ok(txn) => match ImageEntity::find_by_id(id).one(&txn).await {
-            Ok(Some(image)) => {
-                let file_path = image.path_name.clone();
-
-                let image_active: image::ActiveModel = image.into();
-                match image_active.delete(&txn).await {
-                    Ok(_) => {
-                        match tokio_fs::remove_file(format!("./uploads/{}.jpg", &file_path)).await {
-                            Ok(_) => {
-                                let _ = txn.commit().await;
-                                (
-                                    StatusCode::OK,
-                                    Json(json!({
-                                        "message": "Resource deleted successfully."
-                                    })),
-                                )
-                                    .into_response()
-                            }
-                            Err(_) => {
-                                let _ = txn.rollback().await;
-                                (
-                                    StatusCode::BAD_REQUEST,
-                                    Json(json!({
-                                        "error": "Failed to delete this resource"
-                                    })),
-                                )
-                                    .into_response()
-                            }
-                        }
-                    }
-                    Err(_) => {
-                        let _ = txn.rollback().await;
-                        (
-                            StatusCode::BAD_REQUEST,
-                            Json(json!({
-                                "error": "Failed to delete this resource"
-                            })),
-                        )
-                            .into_response()
-                    }
-                }
-            }
-            Ok(None) => (
-                StatusCode::BAD_REQUEST,
+    let txn = match db.begin().await {
+        Ok(txn) => txn,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({
-                    "error": format!("No image with id {} was found.", id)
+                    "error": "Internal server error"
                 })),
             )
-                .into_response(),
-            Err(_) => {
-                let _ = txn.rollback().await;
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({
-                        "error": "Failed to fetch image from database"
-                    })),
-                )
-                    .into_response()
+        }
+    };
+    match ImageEntity::find_by_id(id).one(&txn).await {
+        Ok(Some(image)) => {
+            let file_path = image.path_name.clone();
+
+            let image_active: image::ActiveModel = image.into();
+            match image_active.delete(&txn).await {
+                Ok(_) => {
+                    match tokio_fs::remove_file(format!("./uploads/{}.jpg", &file_path)).await {
+                        Ok(_) => {
+                            let _ = txn.commit().await;
+                            (
+                                StatusCode::OK,
+                                Json(json!({
+                                    "message": "Resource deleted successfully."
+                                })),
+                            )
+                        }
+                        Err(_) => {
+                            let _ = txn.rollback().await;
+                            (
+                                StatusCode::BAD_REQUEST,
+                                Json(json!({
+                                    "error": "Failed to delete this resource"
+                                })),
+                            )
+                        }
+                    }
+                }
+                Err(_) => {
+                    let _ = txn.rollback().await;
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({
+                            "error": "Failed to delete this resource"
+                        })),
+                    )
+                }
             }
-        },
-        Err(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
+        }
+        Ok(None) => (
+            StatusCode::BAD_REQUEST,
             Json(json!({
-                "error": "Failed to start transaction"
+                "error": format!("No image with id {} was found.", id)
             })),
-        )
-            .into_response(),
+        ),
+        Err(_) => {
+            let _ = txn.rollback().await;
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "Failed to fetch image from database"
+                })),
+            )
+        }
     }
 }
+
 
 //structs
 #[derive(Serialize)]

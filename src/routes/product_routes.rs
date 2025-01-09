@@ -52,72 +52,76 @@ async fn create_product(
         "->> Called `create_product()` with payload: \n>{:?}",
         payload.clone()
     );
-    match db.begin().await {
-        Ok(txn) => match user::Entity::find_by_id(payload.image_id).one(&txn).await {
-            Ok(Some(_)) => {
-                let new_product = product::ActiveModel {
-                    name: Set(payload.name),
-                    price: Set(payload.price),
-                    description: Set(payload.description),
-                    image_id: Set(payload.image_id),
-                    category_id: Set(payload.category_id),
-                    is_featured: Set(payload.is_featured.unwrap_or_default()),
-                    is_available: Set(payload.is_available.unwrap_or_default()),
-                    ..Default::default()
-                };
+    let txn = match db.begin().await {
+        Ok(txn) => txn,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "Internal server error"
+                })),
+            );
+        }
+    };
+    
+    match user::Entity::find_by_id(payload.image_id).one(&txn).await {
+        Ok(Some(_)) => {
+            let new_product = product::ActiveModel {
+                name: Set(payload.name),
+                price: Set(payload.price),
+                description: Set(payload.description),
+                image_id: Set(payload.image_id),
+                category_id: Set(payload.category_id),
+                is_featured: Set(payload.is_featured.unwrap_or_default()),
+                is_available: Set(payload.is_available.unwrap_or_default()),
+                ..Default::default()
+            };
 
-                match product::Entity::insert(new_product).exec(&txn).await {
-                    Ok(_) => match txn.commit().await {
-                        Ok(_) => (
-                            StatusCode::CREATED,
-                            Json(json!({
-                                "message": "Product created successfully"
-                            })),
-                        ),
-                        Err(_) => (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(json!({
-                                "error": "Internal server error"
-                            }))
-                        )
-                    },
-                    Err(err) => {
-                        println!("Error: {:?}", err);
-                        let _ = txn.rollback().await;
-                        (
-                            StatusCode::CONFLICT,
-                            Json(json!({
-                                "error": "Product already exists"
-                            })),
-                        )
-                    }
+            match product::Entity::insert(new_product).exec(&txn).await {
+                Ok(_) => match txn.commit().await {
+                    Ok(_) => (
+                        StatusCode::CREATED,
+                        Json(json!({
+                            "message": "Product created successfully"
+                        })),
+                    ),
+                    Err(_) => (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({
+                            "error": "Internal server error"
+                        }))
+                    )
+                },
+                Err(err) => {
+                    println!("Error: {:?}", err);
+                    let _ = txn.rollback().await;
+                    (
+                        StatusCode::CONFLICT,
+                        Json(json!({
+                            "error": "Product already exists"
+                        })),
+                    )
                 }
             }
-            Ok(None) => {
-                let _ = txn.rollback().await;
-                (
-                    StatusCode::NOT_FOUND,
-                    Json(json!({
-                        "error": format!("Image with id {} not found", payload.image_id)
-                    })),
-                )
-            }
-            Err(_) => {
-                let _ = txn.rollback().await;
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({
-                        "error": "Internal server error"
-                    })),
-                )
-            }
-        },
-        Err(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({
-                "error": "Internal server error"
-            })),
-        ),
+        }
+        Ok(None) => {
+            let _ = txn.rollback().await;
+            (
+                StatusCode::NOT_FOUND,
+                Json(json!({
+                    "error": format!("Image with id {} not found", payload.image_id)
+                })),
+            )
+        }
+        Err(_) => {
+            let _ = txn.rollback().await;
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "Internal server error"
+                })),
+            )
+        }
     }
 }
 
@@ -125,48 +129,47 @@ async fn get_products(
     Query(params): Query<GetProductsQuery>,
     Extension(db): Extension<Arc<DatabaseConnection>>,
 ) -> impl IntoResponse {
-    match db.begin().await {
-        Ok(txn) => {
-            let mut half_result =
-                ProductEntity::find().filter(product::Column::IsAvailable.eq(true));
-
-            if Some(true) == params.featured {
-                half_result = half_result.filter(product::Column::IsFeatured.eq(true));
-            }
-
-            if let Some(min) = params.min {
-                half_result = half_result.filter(product::Column::Price.gte(min));
-            }
-
-            if let Some(max) = params.max {
-                half_result = half_result.filter(product::Column::Price.lte(max));
-            }
-
-            let result = half_result.all(&txn).await;
-            match result {
-                Ok(products) => {
-                    let response: Vec<PublicProductResponse> = products
-                        .into_iter()
-                        .map(|prod| PublicProductResponse::new(prod))
-                        .collect();
-                    return (StatusCode::OK, Json(response)).into_response();
-                }
-                Err(_) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({
-                            "error": "Internal server error."
-                        })),
-                    )
-                        .into_response();
-                }
-            }
-        }
+    let txn = match db.begin().await {
+        Ok(txn) => txn,
         Err(_) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({
                     "error": "Internal server error"
+                })),
+            )
+                .into_response();
+        }
+    };
+    let mut half_result =
+        ProductEntity::find().filter(product::Column::IsAvailable.eq(true));
+
+    if Some(true) == params.featured {
+        half_result = half_result.filter(product::Column::IsFeatured.eq(true));
+    }
+
+    if let Some(min) = params.min {
+        half_result = half_result.filter(product::Column::Price.gte(min));
+    }
+
+    if let Some(max) = params.max {
+        half_result = half_result.filter(product::Column::Price.lte(max));
+    }
+
+    let result = half_result.all(&txn).await;
+    match result {
+        Ok(products) => {
+            let response: Vec<PublicProductResponse> = products
+                .into_iter()
+                .map(|prod| PublicProductResponse::new(prod))
+                .collect();
+            return (StatusCode::OK, Json(response)).into_response();
+        }
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "Internal server error."
                 })),
             )
                 .into_response();
@@ -178,36 +181,37 @@ async fn get_product(
     Path(id): Path<i32>,
     Extension(db): Extension<Arc<DatabaseConnection>>,
 ) -> impl IntoResponse {
-    match db.begin().await {
-        Ok(txn) => {
-            let result = ProductEntity::find_by_id(id)
-                .filter(product::Column::IsAvailable.eq(true))
-                .one(&txn)
-                .await;
-            match result {
-                Ok(Some(prod)) => {
-                    (StatusCode::OK, Json(PublicProductResponse::new(prod))).into_response()
-                }
-                Ok(None) => (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({
-                        "error": format!("No product with {} id was found.", id)
-                    })),
-                )
-                    .into_response(),
-                Err(_) => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({
-                        "error": "Internal server error."
-                    })),
-                )
-                    .into_response(),
-            }
+    let txn = match db.begin().await {
+        Ok(txn) => txn,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "Internal server error"
+                })),
+            )
+                .into_response();
         }
+    };
+    let result = ProductEntity::find_by_id(id)
+        .filter(product::Column::IsAvailable.eq(true))
+        .one(&txn)
+        .await;
+    match result {
+        Ok(Some(prod)) => {
+            (StatusCode::OK, Json(PublicProductResponse::new(prod))).into_response()
+        }
+        Ok(None) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": format!("No product with {} id was found.", id)
+            })),
+        )
+            .into_response(),
         Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({
-                "error": "Internal server error"
+                "error": "Internal server error."
             })),
         )
             .into_response(),
@@ -219,39 +223,40 @@ async fn admin_get_product(
     Path(id): Path<i32>,
     Extension(db): Extension<Arc<DatabaseConnection>>,
 ) -> impl IntoResponse {
-    match db.begin().await {
-        Ok(txn) => {
-            let result = ProductEntity::find_by_id(id)
-                .one(&txn)
-                .await;
-
-            match result {
-                Ok(Some(prod)) => match params.full {
-                    Some(true) => (StatusCode::OK, Json(prod)).into_response(),
-                    Some(false) | None => {
-                        (StatusCode::OK, Json(PublicProductResponse::new(prod))).into_response()
-                    }
-                },
-                Ok(None) => (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({
-                        "error": format!("No category with {} id was found.", id)
-                    })),
-                )
-                    .into_response(),
-                Err(_) => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({
-                        "error": "Internal server error."
-                    })),
-                )
-                    .into_response(),
-            }
+    let txn = match db.begin().await {
+        Ok(txn) => txn,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "Internal server error"
+                })),
+            )
+                .into_response();
         }
+    };
+    let result = ProductEntity::find_by_id(id)
+        .one(&txn)
+        .await;
+
+    match result {
+        Ok(Some(prod)) => match params.full {
+            Some(true) => (StatusCode::OK, Json(prod)).into_response(),
+            Some(false) | None => {
+                (StatusCode::OK, Json(PublicProductResponse::new(prod))).into_response()
+            }
+        },
+        Ok(None) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": format!("No category with {} id was found.", id)
+            })),
+        )
+            .into_response(),
         Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({
-                "error": "Internal server error"
+                "error": "Internal server error."
             })),
         )
             .into_response(),
@@ -263,112 +268,106 @@ async fn patch_product(
     Extension(db): Extension<Arc<DatabaseConnection>>,
     Json(payload): Json<PatchProductPayload>,
 ) -> impl IntoResponse {
-    match db.begin().await {
-        Ok(txn) => {
-            let result = ProductEntity::find_by_id(id).one(&txn).await;
-            match result {
-                Ok(Some(product)) => {
-                    let mut product: product::ActiveModel = product.into();
+    let txn = match db.begin().await {
+        Ok(txn) => txn,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "Internal server error"
+                })),
+            );
+        }
+    };
+    let result = ProductEntity::find_by_id(id).one(&txn).await;
+    match result {
+        Ok(Some(product)) => {
+            let mut product: product::ActiveModel = product.into();
 
-                    if let Some(name) = payload.name {
-                        product.name = Set(name);
-                    }
+            if let Some(name) = payload.name {
+                product.name = Set(name);
+            }
 
-                    if let Some(price) = payload.price {
-                        product.price = Set(price);
-                    }
+            if let Some(price) = payload.price {
+                product.price = Set(price);
+            }
 
-                    if let Some(description) = payload.description {
-                        product.description = Set(description);
-                    }
+            if let Some(description) = payload.description {
+                product.description = Set(description);
+            }
 
-                    if let Some(image_id) = payload.image_id {
-                        match image::Entity::find_by_id(image_id).one(&txn).await {
-                            Ok(_) => product.image_id = Set(image_id),
-                            Err(_) => {
-                                return (
-                                    StatusCode::BAD_REQUEST,
-                                    Json(json!({
-                                        "error": format!("No image with {image_id} id was found")
-                                    })),
-                                )
-                                    .into_response();
-                            }
-                        }
-                    }
-
-                    if let Some(category_id) = payload.category_id {
-                        match category::Entity::find_by_id(category_id).one(&txn).await {
-                            Ok(_) => product.category_id = Set(category_id),
-                            Err(_) => {
-                                return (
-                                    StatusCode::BAD_REQUEST,
-                                    Json(json!({
-                                        "error": format!("No category with {category_id} id was found")
-                                    })),
-                                )
-                                    .into_response();
-                            }
-                        }
-                    }
-
-                    if let Some(is_featured) = payload.is_featured {
-                        product.is_featured = Set(is_featured);
-                    }
-
-                    if let Some(is_available) = payload.is_available {
-                        product.is_available = Set(is_available);
-                    }
-
-                    let result = product.update(&txn).await;
-                    match result {
-                        Ok(new_model) => {
-                            let _ = txn.commit().await;
-                            println!("New model: {:?}", new_model);
-                            (
-                                StatusCode::OK,
-                                Json(json!({
-                                    "message": "Resource patched successfully."
-                                })),
-                            )
-                                .into_response()
-                        }
-                        Err(_) => {
-                            //DB Failed / unique constraint
-                            let _ = txn.rollback().await;
-                            (
-                                StatusCode::BAD_REQUEST,
-                                Json(json!({
-                                    "error": "Failed to patch this resource"
-                                })),
-                            )
-                                .into_response()
-                        }
+            if let Some(image_id) = payload.image_id {
+                match image::Entity::find_by_id(image_id).one(&txn).await {
+                    Ok(_) => product.image_id = Set(image_id),
+                    Err(_) => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({
+                                "error": format!("No image with {image_id} id was found")
+                            })),
+                        );
                     }
                 }
-                Ok(None) => (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({
-                        "error": format!("No image with {} id was found.", id)
-                    })),
-                )
-                    .into_response(),
-                Err(_) => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({
-                        "error": "Internal server error."
-                    })),
-                )
-                    .into_response(),
+            }
+
+            if let Some(category_id) = payload.category_id {
+                match category::Entity::find_by_id(category_id).one(&txn).await {
+                    Ok(_) => product.category_id = Set(category_id),
+                    Err(_) => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({
+                                "error": format!("No category with {category_id} id was found")
+                            })),
+                        );
+                    }
+                }
+            }
+
+            if let Some(is_featured) = payload.is_featured {
+                product.is_featured = Set(is_featured);
+            }
+
+            if let Some(is_available) = payload.is_available {
+                product.is_available = Set(is_available);
+            }
+
+            let result = product.update(&txn).await;
+            match result {
+                Ok(new_model) => {
+                    let _ = txn.commit().await;
+                    println!("New model: {:?}", new_model);
+                    (
+                        StatusCode::OK,
+                        Json(json!({
+                            "message": "Resource patched successfully."
+                        })),
+                    )
+                }
+                Err(_) => {
+                    //DB Failed / unique constraint
+                    let _ = txn.rollback().await;
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({
+                            "error": "Failed to patch this resource"
+                        })),
+                    )
+                }
             }
         }
+        Ok(None) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": format!("No image with {} id was found.", id)
+            })),
+        ),
         Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({
-                "error": "Internal server error"
+                "error": "Internal server error."
             })),
         )
-            .into_response(),
     }
 }
 
@@ -376,61 +375,56 @@ async fn delete_product(
     Path(id): Path<i32>,
     Extension(db): Extension<Arc<DatabaseConnection>>,
 ) -> impl IntoResponse {
-    match db.begin().await {
-        Ok(txn) => {
-            let result = ProductEntity::find_by_id(id).one(&txn).await;
+    let txn = match db.begin().await {
+        Ok(txn) => txn,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "Internal server error"
+                })),
+            )
+        }
+    };
+    let result = ProductEntity::find_by_id(id).one(&txn).await;
+    match result {
+        Ok(Some(product)) => {
+            let product: product::ActiveModel = product.into();
+            let result = product.delete(&txn).await;
             match result {
-                Ok(Some(product)) => {
-                    let product: product::ActiveModel = product.into();
-                    let result = product.delete(&txn).await;
-                    match result {
-                        Ok(delete_res) => {
-                            let _ = txn.commit().await;
-                            println!("New model: {:?}", delete_res);//?????
-                            (
-                                StatusCode::OK,
-                                Json(json!({
-                                    "message": "Resource deleted successfully."
-                                })),
-                            )
-                                .into_response()
-                        }
-                        Err(_) => {
-                            //DB Failed / unique constraint
-                            let _ = txn.rollback().await;
-                            (
-                                StatusCode::BAD_REQUEST,
-                                Json(json!({
-                                    "error": "Failed to delete this resource"
-                                })),
-                            )
-                                .into_response()
-                        }
-                    }
+                Ok(_) => {
+                    let _ = txn.commit().await;
+                    (
+                        StatusCode::OK,
+                        Json(json!({
+                            "message": "Resource deleted successfully."
+                        })),
+                    )
                 }
-                Ok(None) => (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({
-                        "error": format!("No image with {} id was found.", id)
-                    })),
-                )
-                    .into_response(),
-                Err(_) => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({
-                        "error": "Internal server error."
-                    })),
-                )
-                    .into_response(),
+                Err(_) => {
+                    //DB Failed / unique constraint
+                    let _ = txn.rollback().await;
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({
+                            "error": "Failed to delete this resource"
+                        })),
+                    )
+                }
             }
         }
+        Ok(None) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": format!("No image with {} id was found.", id)
+            })),
+        ),
         Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({
-                "error": "Internal server error"
+                "error": "Internal server error."
             })),
         )
-            .into_response(),
     }
 }
 

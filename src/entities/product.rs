@@ -27,12 +27,16 @@ pub enum Relation {
         belongs_to = "Category",
         from = "crate::entities::product::Column::CategoryId",
         to = "crate::entities::category::Column::Id",
+        on_update = "Cascade",
+        on_delete = "Cascade",
     )]
     Category,
     #[sea_orm(
         belongs_to = "Image",
         from = "crate::entities::product::Column::ImageId",
         to = "crate::entities::image::Column::Id",
+        on_update = "Cascade",
+        on_delete = "Restrict",
     )]
     Image,
 }

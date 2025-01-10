@@ -20,13 +20,15 @@ pub enum Relation {
         from = "crate::entities::cart::Column::UserId",
         to = "crate::entities::user::Column::Id",
         on_update = "Cascade",
-        on_delete = "Cascade"
+        on_delete = "Cascade",
     )]
     User,
     #[sea_orm(
         belongs_to = "Product",
         from = "crate::entities::cart::Column::ProductId",
         to = "crate::entities::product::Column::Id",
+        on_update = "Cascade",
+        on_delete = "Cascade",
     )]
     Product,
 }

@@ -6,25 +6,17 @@ use axum::{
     Json, Router,
 };
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set,
+    ActiveModelTrait, DatabaseConnection, EntityTrait, Set,
     TransactionTrait,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
 
-use crate::entities::{category, category::Entity as CategoryEntity, image, user::Role};
-use crate::middleware::auth::{auth_middleware, AuthState};
+use crate::entities::{category, category::Entity as CategoryEntity, image};
 
 //ROUTERS
-pub async fn category_routes(db: Arc<DatabaseConnection>) -> Router {
-    Router::new()
-        .route("/category", get(get_categories))
-        .route("/category/:id", get(get_category))
-        .layer(Extension(db))
-}
-
-pub async fn admin_category_routes(db: Arc<DatabaseConnection>) -> Router {
+pub fn admin_category_router(db: Arc<DatabaseConnection>) -> Router {
     Router::new()
         .route("/category", post(create_category))
         .route(
@@ -33,13 +25,6 @@ pub async fn admin_category_routes(db: Arc<DatabaseConnection>) -> Router {
                 .patch(patch_category)
                 .delete(delete_category),
         )
-        .layer(axum::middleware::from_fn_with_state(
-            AuthState {
-                db: db.clone(),
-                role: Role::Admin,
-            },
-            auth_middleware,
-        ))
         .layer(Extension(db))
 }
 
@@ -121,93 +106,6 @@ async fn create_category(
                 })),
             )
         }
-    }
-}
-
-async fn get_categories(
-    Query(params): Query<GetCategoriesQuery>,
-    Extension(db): Extension<Arc<DatabaseConnection>>,
-) -> impl IntoResponse {
-    println!("Called get categories");
-    let txn = match db.begin().await {
-        Ok(txn) => txn,
-        Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": "Internal server error"
-                })),
-            )
-                .into_response();
-        }
-    };
-    let mut half_result = CategoryEntity::find().filter(category::Column::IsAvailable.eq(true));
-
-    if Some(true) == params.featured {
-        half_result = half_result.filter(category::Column::IsFeatured.eq(true));
-    }
-
-    let result = half_result.all(&txn).await;
-    match result {
-        Ok(categories) => {
-            let response: Vec<PublicCategoryResponse> = categories
-                .into_iter()
-                .map(|categ| PublicCategoryResponse::new(categ))
-                .collect();
-            return (StatusCode::OK, Json(response)).into_response();
-        }
-        Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": "Internal server error."
-                })),
-            )
-                .into_response();
-        }
-    }
-}
-
-async fn get_category(
-    Path(id): Path<i32>,
-    Extension(db): Extension<Arc<DatabaseConnection>>,
-) -> impl IntoResponse {
-    println!("->> Called `create_category()`",);
-    let txn = match db.begin().await {
-        Ok(txn) => txn,
-        Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": "Internal server error"
-                })),
-            )
-                .into_response();
-        }
-    };
-
-    let result = CategoryEntity::find_by_id(id)
-        .filter(category::Column::IsAvailable.eq(true))
-        .one(&txn)
-        .await;
-    match result {
-        Ok(Some(categor)) => {
-            (StatusCode::OK, Json(PublicCategoryResponse::new(categor))).into_response()
-        }
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(json!({
-                "error": format!("No category with {} id was found.", id)
-            })),
-        )
-            .into_response(),
-        Err(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({
-                "error": "Internal server error."
-            })),
-        )
-            .into_response(),
     }
 }
 
@@ -408,11 +306,6 @@ struct CreateCategory {
 #[derive(Deserialize)]
 struct GetCategoryQuery {
     full: Option<bool>,
-}
-
-#[derive(Deserialize)]
-struct GetCategoriesQuery {
-    featured: Option<bool>,
 }
 
 #[derive(Deserialize)]

@@ -14,7 +14,7 @@ async fn test_upload_image() {
     });
 
     let login_response = client
-        .post("http://127.0.0.1:3000/login")
+        .post("http://127.0.0.1:3000/api/login")
         .json(&login_payload)
         .send()
         .await
@@ -39,7 +39,7 @@ async fn test_upload_image() {
 
     // Step 3: Upload image
     let upload_response = client
-        .post("http://127.0.0.1:3000/api/image")
+        .post("http://127.0.0.1:3000/api/admin/image")
         .bearer_auth(token) // Use Authorization header with Bearer token
         .multipart(form)
         .send()
@@ -64,7 +64,7 @@ async fn test_get_image_by_id() {
     });
 
     let login_response = client
-        .post("http://127.0.0.1:3000/login")
+        .post("http://127.0.0.1:3000/api/login")
         .json(&login_payload)
         .send()
         .await
@@ -90,7 +90,7 @@ async fn test_get_image_by_id() {
 
     let image_id = 1; // Replace with valid image ID
     let get_response = client
-        .get(format!("http://127.0.0.1:3000/image/{}", image_id))
+        .get(format!("http://127.0.0.1:3000/api/image/{}", image_id))
         .headers(headers.clone())
         .send()
         .await
@@ -119,7 +119,7 @@ async fn test_patch_image() {
     });
 
     let login_response = client
-        .post("http://127.0.0.1:3000/login")
+        .post("http://127.0.0.1:3000/api/login")
         .json(&login_payload)
         .send()
         .await
@@ -148,7 +148,7 @@ async fn test_patch_image() {
 
     let image_id = 1; // Replace with valid image ID
     let patch_response = client
-        .patch(format!("http://127.0.0.1:3000/api/image/{}", image_id))
+        .patch(format!("http://127.0.0.1:3000/api/admin/image/{}", image_id))
         .headers(headers.clone())
         .json(&patch_payload)
         .send()
@@ -175,7 +175,7 @@ async fn test_delete_image() {
     });
 
     let login_response = client
-        .post("http://127.0.0.1:3000/login")
+        .post("http://127.0.0.1:3000/api/login")
         .json(&login_payload)
         .send()
         .await
@@ -200,7 +200,7 @@ async fn test_delete_image() {
 
     let image_id = 1; // Replace with valid image ID
     let delete_response = client
-        .delete(format!("http://127.0.0.1:3000/api/image/{}", image_id))
+        .delete(format!("http://127.0.0.1:3000/api/admin/image/{}", image_id))
         .headers(headers)
         .send()
         .await

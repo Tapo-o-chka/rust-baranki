@@ -12,7 +12,7 @@ async fn test_category() {
     });
 
     let response = client
-        .post("http://127.0.0.1:3000/api/login")
+        .post("http://127.0.0.1:3000/login")
         .json(&payload)
         .send()
         .await
@@ -60,7 +60,7 @@ async fn test_get_category() {
     });
     
     let response = client
-        .post("http://127.0.0.1:3000/api/login")
+        .post("http://127.0.0.1:3000/login")
         .json(&payload)
         .send()
         .await
@@ -106,7 +106,7 @@ async fn test_create_category() {
     });
     
     let response = client
-        .post("http://127.0.0.1:3000/api/login")
+        .post("http://127.0.0.1:3000/login")
         .json(&payload)
         .send()
         .await
@@ -172,7 +172,7 @@ async fn test_patch_category() {
     });
     
     let response = client
-        .post("http://127.0.0.1:3000/api/login")
+        .post("http://127.0.0.1:3000/login")
         .json(&payload)
         .send()
         .await
@@ -263,7 +263,7 @@ async fn test_delete_category() {
     });
     
     let response = client
-        .post("http://127.0.0.1:3000/api/login")
+        .post("http://127.0.0.1:3000/login")
         .json(&payload)
         .send()
         .await

@@ -22,8 +22,6 @@ pub enum Relation {
         belongs_to = "Image",
         from = "crate::entities::category::Column::ImageId",
         to = "crate::entities::image::Column::Id",
-        on_update = "Cascade",
-        on_delete = "SetNull"
     )]
     Image,
 }

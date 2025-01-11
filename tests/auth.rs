@@ -1,6 +1,22 @@
 use reqwest::{header, Client};
 use tokio;
 
+// Test if the server is running and responds to a health check
+#[tokio::test]
+async fn test_health_check() {
+    let client = Client::new();
+
+    let response = client
+        .get("http://127.0.0.1:3000/")
+        .send()
+        .await
+        .expect("Failed to send request");
+
+    assert!(response.status().is_success(), "Health check failed");
+    let body = response.text().await.expect("Failed to read response body");
+    println!("{:?}", body);
+}
+
 //auth testing
 #[tokio::test]
 async fn test_create_user() {
@@ -12,7 +28,7 @@ async fn test_create_user() {
     });
 
     let response = client
-        .post("http://127.0.0.1:3000/api/register")
+        .post("http://127.0.0.1:3000/register")
         .json(&payload)
         .send()
         .await
@@ -36,7 +52,7 @@ async fn test_login() {
     });
 
     let response = client
-        .post("http://127.0.0.1:3000/api/login")
+        .post("http://127.0.0.1:3000/login")
         .json(&payload)
         .send()
         .await

@@ -1,31 +1,119 @@
 use axum::routing::get;
 use axum::{
     extract::{Extension, Multipart, Path},
-    http::StatusCode,
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     response::IntoResponse,
     routing::post,
     Json, Router,
 };
-use dotenvy::dotenv;
 use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set, TransactionTrait};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::fs as tokio_fs;
+use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 
-use crate::entities::image::FileExtension;
-use crate::entities::{image, image::Entity as ImageEntity};
+const FILE_SIZE_LIMIT: usize = 8 * 1024 * 1024 * 8;
 
-pub fn upload_router(db: Arc<DatabaseConnection>) -> Router {
+use crate::entities::image::FileExtension;
+use crate::entities::{image, image::Entity as ImageEntity, user::Role};
+use crate::middleware::auth::{auth_middleware, AuthState};
+
+pub async fn public_image_router(db: Arc<DatabaseConnection>) -> Router {
+    Router::new()
+        .route("/image/:id", get(print_image))
+        .layer(Extension(db))
+}
+
+pub async fn upload_routes(db: Arc<DatabaseConnection>) -> Router {
     Router::new()
         .route("/image", post(upload).get(get_images))
         .route(
             "/image/:id",
             get(get_image).patch(patch_image).delete(delete_image),
         )
+        .layer(axum::middleware::from_fn_with_state(
+            AuthState {
+                db: db.clone(),
+                role: Role::Admin,
+            },
+            auth_middleware,
+        ))
         .layer(Extension(db))
+}
+
+pub async fn print_image(
+    Path(id): Path<i32>,
+    Extension(db): Extension<Arc<DatabaseConnection>>,
+) -> impl IntoResponse {
+    let txn = match db.begin().await {
+        Ok(txn) => txn,
+        Err(_) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "Internal server error"
+                })),
+            ));
+        }
+    };
+
+    let path = match ImageEntity::find_by_id(id).one(&txn).await {
+        Ok(Some(model)) => {
+            "./uploads/".to_owned() + &model.path_name + "." + &model.extension.to_string()
+        }
+        Ok(None) => {
+            println!("havent found this one");
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(json!({
+                    "error": "Not found"
+                })),
+            ));
+        }
+        Err(_) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "Internal server error"
+                })),
+            ));
+        }
+    };
+    println!("Will panic after that");
+    let file = match tokio::fs::File::open(&path).await {
+        Ok(file) => file,
+        Err(_) => {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(json!({
+                    "error": "Not found"
+                })),
+            ))
+        }
+    };
+
+    let content_type = mime_guess::from_path(&path)
+        .first_raw()
+        .unwrap_or("application/octet-stream");
+
+    let stream = ReaderStream::new(file);
+    let body = axum::body::Body::from_stream(stream);
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_str(content_type)
+            .unwrap_or(HeaderValue::from_static("application/octet-stream")),
+    );
+    headers.insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_static("inline"),
+    );
+
+    Ok((headers, body))
 }
 
 fn allowed_content_types() -> HashMap<&'static str, FileExtension> {
@@ -97,7 +185,7 @@ async fn upload(
                         );
                     }
                 };
-                if data.len() > get_file_size_limit() {
+                if data.len() > FILE_SIZE_LIMIT {
                     return (
                         StatusCode::PAYLOAD_TOO_LARGE,
                         Json(json!({
@@ -228,7 +316,9 @@ async fn get_image(
 
     let result = ImageEntity::find_by_id(id).one(&txn).await;
     match result {
-        Ok(Some(image)) => (StatusCode::OK, Json(ImageResponse::new(image))).into_response(),
+        Ok(Some(image)) => {
+            (StatusCode::OK, Json(ImageResponse::new(image))).into_response()
+        }
         Ok(None) => (
             StatusCode::BAD_REQUEST,
             Json(json!({
@@ -379,6 +469,7 @@ async fn delete_image(
     }
 }
 
+
 //structs
 #[derive(Serialize)]
 struct ImageResponse {
@@ -398,12 +489,4 @@ impl ImageResponse {
             file_name: value.file_name,
         }
     }
-}
-
-fn get_file_size_limit() -> usize {
-    dotenv().ok();
-    std::env::var("FILE_SIZE_LIMIT")
-        .expect("FILE_SIZE_LIMIT not found in .env file")
-        .parse::<usize>()
-        .expect("Failed to parse file size limit")
 }

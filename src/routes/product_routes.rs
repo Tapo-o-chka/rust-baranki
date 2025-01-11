@@ -6,21 +6,25 @@ use axum::{
     Json, Router,
 };
 use sea_orm::{
-    ActiveModelTrait, DatabaseConnection, EntityTrait, Set,
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set,
     TransactionTrait,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
 
-use crate::entities::{
-    category, image,
-    product::{self, Entity as ProductEntity},
-    user,
-};
+use crate::entities::{category, image, product::{self, Entity as ProductEntity}, user, user::Role};
+use crate::middleware::auth::{auth_middleware, AuthState};
 
 //ROUTERS
-pub fn admin_product_router(db: Arc<DatabaseConnection>) -> Router {
+pub async fn product_routes(db: Arc<DatabaseConnection>) -> Router {
+    Router::new()
+        .route("/product", get(get_products))
+        .route("/product/:id", get(get_product))
+        .layer(Extension(db))
+}
+
+pub async fn admin_product_routes(db: Arc<DatabaseConnection>) -> Router {
     Router::new()
         .route("/product", post(create_product))
         .route(
@@ -29,53 +33,17 @@ pub fn admin_product_router(db: Arc<DatabaseConnection>) -> Router {
                 .patch(patch_product)
                 .delete(delete_product),
         )
+        .layer(axum::middleware::from_fn_with_state(
+            AuthState {
+                db: db.clone(),
+                role: Role::Admin,
+            },
+            auth_middleware,
+        ))
         .layer(Extension(db))
 }
 
 //ROUTES
-async fn admin_get_product(
-    Query(params): Query<GetProductQuery>,
-    Path(id): Path<i32>,
-    Extension(db): Extension<Arc<DatabaseConnection>>,
-) -> impl IntoResponse {
-    let txn = match db.begin().await {
-        Ok(txn) => txn,
-        Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": "Internal server error"
-                })),
-            )
-                .into_response();
-        }
-    };
-    let result = ProductEntity::find_by_id(id).one(&txn).await;
-
-    match result {
-        Ok(Some(prod)) => match params.full {
-            Some(true) => (StatusCode::OK, Json(prod)).into_response(),
-            Some(false) | None => {
-                (StatusCode::OK, Json(PublicProductResponse::new(prod))).into_response()
-            }
-        },
-        Ok(None) => (
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "error": format!("No category with {} id was found.", id)
-            })),
-        )
-            .into_response(),
-        Err(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({
-                "error": "Internal server error."
-            })),
-        )
-            .into_response(),
-    }
-}
-
 async fn create_product(
     Extension(db): Extension<Arc<DatabaseConnection>>,
     Json(payload): Json<CreateProduct>,
@@ -95,7 +63,7 @@ async fn create_product(
             );
         }
     };
-
+    
     match user::Entity::find_by_id(payload.image_id).one(&txn).await {
         Ok(Some(_)) => {
             let new_product = product::ActiveModel {
@@ -121,8 +89,8 @@ async fn create_product(
                         StatusCode::INTERNAL_SERVER_ERROR,
                         Json(json!({
                             "error": "Internal server error"
-                        })),
-                    ),
+                        }))
+                    )
                 },
                 Err(err) => {
                     println!("Error: {:?}", err);
@@ -154,6 +122,144 @@ async fn create_product(
                 })),
             )
         }
+    }
+}
+
+async fn get_products(
+    Query(params): Query<GetProductsQuery>,
+    Extension(db): Extension<Arc<DatabaseConnection>>,
+) -> impl IntoResponse {
+    let txn = match db.begin().await {
+        Ok(txn) => txn,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "Internal server error"
+                })),
+            )
+                .into_response();
+        }
+    };
+    let mut half_result =
+        ProductEntity::find().filter(product::Column::IsAvailable.eq(true));
+
+    if Some(true) == params.featured {
+        half_result = half_result.filter(product::Column::IsFeatured.eq(true));
+    }
+
+    if let Some(min) = params.min {
+        half_result = half_result.filter(product::Column::Price.gte(min));
+    }
+
+    if let Some(max) = params.max {
+        half_result = half_result.filter(product::Column::Price.lte(max));
+    }
+
+    let result = half_result.all(&txn).await;
+    match result {
+        Ok(products) => {
+            let response: Vec<PublicProductResponse> = products
+                .into_iter()
+                .map(|prod| PublicProductResponse::new(prod))
+                .collect();
+            return (StatusCode::OK, Json(response)).into_response();
+        }
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "Internal server error."
+                })),
+            )
+                .into_response();
+        }
+    }
+}
+
+async fn get_product(
+    Path(id): Path<i32>,
+    Extension(db): Extension<Arc<DatabaseConnection>>,
+) -> impl IntoResponse {
+    let txn = match db.begin().await {
+        Ok(txn) => txn,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "Internal server error"
+                })),
+            )
+                .into_response();
+        }
+    };
+    let result = ProductEntity::find_by_id(id)
+        .filter(product::Column::IsAvailable.eq(true))
+        .one(&txn)
+        .await;
+    match result {
+        Ok(Some(prod)) => {
+            (StatusCode::OK, Json(PublicProductResponse::new(prod))).into_response()
+        }
+        Ok(None) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": format!("No product with {} id was found.", id)
+            })),
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "error": "Internal server error."
+            })),
+        )
+            .into_response(),
+    }
+}
+
+async fn admin_get_product(
+    Query(params): Query<GetProductQuery>,
+    Path(id): Path<i32>,
+    Extension(db): Extension<Arc<DatabaseConnection>>,
+) -> impl IntoResponse {
+    let txn = match db.begin().await {
+        Ok(txn) => txn,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "Internal server error"
+                })),
+            )
+                .into_response();
+        }
+    };
+    let result = ProductEntity::find_by_id(id)
+        .one(&txn)
+        .await;
+
+    match result {
+        Ok(Some(prod)) => match params.full {
+            Some(true) => (StatusCode::OK, Json(prod)).into_response(),
+            Some(false) | None => {
+                (StatusCode::OK, Json(PublicProductResponse::new(prod))).into_response()
+            }
+        },
+        Ok(None) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": format!("No category with {} id was found.", id)
+            })),
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "error": "Internal server error."
+            })),
+        )
+            .into_response(),
     }
 }
 
@@ -261,7 +367,7 @@ async fn patch_product(
             Json(json!({
                 "error": "Internal server error."
             })),
-        ),
+        )
     }
 }
 
@@ -318,7 +424,7 @@ async fn delete_product(
             Json(json!({
                 "error": "Internal server error."
             })),
-        ),
+        )
     }
 }
 
@@ -332,6 +438,13 @@ struct CreateProduct {
     category_id: i32,
     is_featured: Option<bool>,
     is_available: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct GetProductsQuery {
+    featured: Option<bool>,
+    min: Option<f32>,
+    max: Option<f32>,
 }
 
 #[derive(Deserialize)]
@@ -368,7 +481,7 @@ impl PublicProductResponse {
             price: value.price,
             description: value.description,
             image_id: value.image_id,
-            category_id: value.category_id,
+            category_id: value.category_id
         }
     }
 }

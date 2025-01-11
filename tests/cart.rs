@@ -15,7 +15,7 @@ async fn test_get_cart() {
     });
 
     let login_response = client
-        .post("http://127.0.0.1:3000/api/login")
+        .post("http://127.0.0.1:3000/login")
         .json(&login_payload)
         .send()
         .await
@@ -70,7 +70,7 @@ async fn test_add_product_to_cart() {
     });
 
     let login_response = client
-        .post("http://127.0.0.1:3000/api/login")
+        .post("http://127.0.0.1:3000/login")
         .json(&login_payload)
         .send()
         .await
@@ -134,7 +134,7 @@ async fn test_remove_product_from_cart() {
     });
 
     let login_response = client
-        .post("http://127.0.0.1:3000/api/login")
+        .post("http://127.0.0.1:3000/login")
         .json(&login_payload)
         .send()
         .await
@@ -191,7 +191,7 @@ async fn test_patch_cart_entry() {
     });
 
     let login_response = client
-        .post("http://127.0.0.1:3000/api/login")
+        .post("http://127.0.0.1:3000/login")
         .json(&login_payload)
         .send()
         .await

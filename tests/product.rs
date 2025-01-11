@@ -13,7 +13,7 @@ async fn test_create_product() {
     });
 
     let login_response = client
-        .post("http://127.0.0.1:3000/api/login")
+        .post("http://127.0.0.1:3000/login")
         .json(&login_payload)
         .send()
         .await
@@ -82,7 +82,7 @@ async fn test_get_products() {
     });
 
     let login_response = client
-        .post("http://127.0.0.1:3000/api/login")
+        .post("http://127.0.0.1:3000/login")
         .json(&login_payload)
         .send()
         .await
@@ -137,7 +137,7 @@ async fn test_get_product() {
     });
 
     let login_response = client
-        .post("http://127.0.0.1:3000/api/login")
+        .post("http://127.0.0.1:3000/login")
         .json(&login_payload)
         .send()
         .await
@@ -193,7 +193,7 @@ async fn test_patch_product() {
     });
 
     let login_response = client
-        .post("http://127.0.0.1:3000/api/login")
+        .post("http://127.0.0.1:3000/login")
         .json(&login_payload)
         .send()
         .await
@@ -257,7 +257,7 @@ async fn test_delete_product() {
     });
 
     let login_response = client
-        .post("http://127.0.0.1:3000/api/login")
+        .post("http://127.0.0.1:3000/login")
         .json(&login_payload)
         .send()
         .await

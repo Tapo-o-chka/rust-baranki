@@ -13,14 +13,22 @@ use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
 
+use crate::entities::user::Role;
 use crate::entities::{cart, cart::Entity as CartEntity, product};
-use crate::middleware::auth::Claims;
+use crate::middleware::auth::{auth_middleware, AuthState, Claims};
 
 //ROUTERS
-pub fn cart_router(db: Arc<DatabaseConnection>) -> Router {
+pub async fn cart_routes(db: Arc<DatabaseConnection>) -> Router {
     Router::new()
         .route("/cart", get(get_cart).post(add_product))
         .route("/cart/:id", patch(patch_entry).delete(remove_product))
+        .layer(axum::middleware::from_fn_with_state(
+            AuthState {
+                db: db.clone(),
+                role: Role::User,
+            },
+            auth_middleware,
+        ))
         .layer(Extension(db))
 }
 

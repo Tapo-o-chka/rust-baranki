@@ -1,12 +1,20 @@
+use axum::{routing::get, Router};
 use sea_orm::{Database, DatabaseConnection};
 use std::sync::Arc;
 
 mod entities;
+mod routes;
 mod middleware;
-mod api;
 
 use crate::entities::{setup_schema, primary_settup};
-use crate::api::create_api_router;
+
+use crate::routes::{
+    auth_routes::auth_routes,
+    category_routes::{category_routes, admin_category_routes},
+    product_routes::{product_routes, admin_product_routes},
+    cart_routes::cart_routes,
+    upload_routes::{upload_routes, public_image_router}
+};
 
 #[tokio::main]
 async fn main() {
@@ -21,10 +29,32 @@ async fn main() {
     let shared_db = Arc::new(db);
 
     primary_settup(shared_db.clone()).await;
-    
-    let app = create_api_router(shared_db);
+
+    let user_routes = auth_routes(shared_db.clone()).await;
+    let category_routes = category_routes(shared_db.clone()).await;
+    let admin_category_routes = admin_category_routes(shared_db.clone()).await;
+    let product_routes = product_routes(shared_db.clone()).await;
+    let admin_product_routes = admin_product_routes(shared_db.clone()).await;
+    let upload_routes = upload_routes(shared_db.clone()).await;
+    let cart_routes = cart_routes(shared_db.clone()).await;
+    let public_image_router = public_image_router(shared_db.clone()).await;
+
+    let app = Router::new()
+        .route("/", get(root))
+        .nest("/", user_routes)
+        .nest("/", public_image_router)
+        .nest("/api", category_routes)
+        .nest("/api", product_routes)
+        .nest("/api", upload_routes)
+        .nest("/api", cart_routes)
+        .nest("/api/admin", admin_category_routes)
+        .nest("/api/admin", admin_product_routes);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
     println!("Running at {:?}", listener);
     axum::serve(listener, app).await.unwrap();
+}
+
+async fn root() -> &'static str {
+    "Hello, World!"
 }

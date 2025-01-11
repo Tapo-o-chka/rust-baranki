@@ -14,7 +14,7 @@ use std::sync::Arc;
 use crate::entities::user::{self, Entity as UserEntity, Role};
 use crate::middleware::auth::generate_token;
 
-pub fn auth_router(db: Arc<DatabaseConnection>) -> Router {
+pub async fn auth_routes(db: Arc<DatabaseConnection>) -> Router {
     Router::new()
         .route("/register", post(register_user))
         .route("/login", post(login))

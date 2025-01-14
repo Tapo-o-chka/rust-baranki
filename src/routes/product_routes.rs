@@ -2,45 +2,40 @@ use axum::{
     extract::{Extension, Path, Query},
     http::StatusCode,
     response::IntoResponse,
-    routing::{get, post},
+    routing::{get, patch, post},
     Json, Router,
 };
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set,
-    TransactionTrait,
+    ActiveModelTrait, ColumnTrait, Condition, DatabaseConnection, EntityTrait, FromQueryResult,
+    JoinType, QueryFilter, QueryOrder, QuerySelect, RelationTrait, Set, TransactionTrait,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
 
-use crate::entities::{category, image, product::{self, Entity as ProductEntity}, user, user::Role};
-use crate::middleware::auth::{auth_middleware, AuthState};
+use crate::entities::{
+    category, image,
+    product::{self, Entity as ProductEntity},
+    user,
+    user::Role,
+};
+use crate::middleware::auth::auth_middleware;
 
 //ROUTERS
-pub async fn product_routes(db: Arc<DatabaseConnection>) -> Router {
+pub fn product_routes() -> Router {
     Router::new()
         .route("/product", get(get_products))
         .route("/product/:id", get(get_product))
-        .layer(Extension(db))
 }
 
-pub async fn admin_product_routes(db: Arc<DatabaseConnection>) -> Router {
+pub fn admin_product_routes() -> Router {
     Router::new()
-        .route("/product", post(create_product))
-        .route(
-            "/product/:id",
-            get(admin_get_product)
-                .patch(patch_product)
-                .delete(delete_product),
-        )
+        .route("/product", post(create_product).get(admin_get_products))
+        .route("/product/:id", patch(patch_product).delete(delete_product))
         .layer(axum::middleware::from_fn_with_state(
-            AuthState {
-                db: db.clone(),
-                role: Role::Admin,
-            },
+            Role::Admin,
             auth_middleware,
         ))
-        .layer(Extension(db))
 }
 
 //ROUTES
@@ -63,7 +58,7 @@ async fn create_product(
             );
         }
     };
-    
+
     match user::Entity::find_by_id(payload.image_id).one(&txn).await {
         Ok(Some(_)) => {
             let new_product = product::ActiveModel {
@@ -89,8 +84,8 @@ async fn create_product(
                         StatusCode::INTERNAL_SERVER_ERROR,
                         Json(json!({
                             "error": "Internal server error"
-                        }))
-                    )
+                        })),
+                    ),
                 },
                 Err(err) => {
                     println!("Error: {:?}", err);
@@ -141,40 +136,73 @@ async fn get_products(
                 .into_response();
         }
     };
-    let mut half_result =
-        ProductEntity::find().filter(product::Column::IsAvailable.eq(true));
 
-    if Some(true) == params.featured {
-        half_result = half_result.filter(product::Column::IsFeatured.eq(true));
+    let mut condition = Condition::all();
+
+    //Filter zone
+    if let Some(price_bottom) = params.price_bottom {
+        condition = condition.add(product::Column::Price.gte(price_bottom));
+    }
+    if let Some(price_top) = params.price_top {
+        condition = condition.add(product::Column::Price.lte(price_top));
+    }
+    if let Some(category_ids) = params.category_ids {
+        condition = condition.add(product::Column::CategoryId.is_in(category_ids));
+    }
+    if params.only_available.unwrap_or(false) {
+        condition = condition.add(product::Column::IsAvailable.eq(true));
     }
 
-    if let Some(min) = params.min {
-        half_result = half_result.filter(product::Column::Price.gte(min));
-    }
+    //Sorting zone
+    let order = match params.order.as_deref() {
+        Some("desc") => sea_orm::Order::Desc,
+        _ => sea_orm::Order::Asc,
+    };
 
-    if let Some(max) = params.max {
-        half_result = half_result.filter(product::Column::Price.lte(max));
-    }
+    let sort_column = match params.sort_by.as_deref() {
+        Some("price") => product::Column::Price,
+        Some("is_available") => product::Column::IsAvailable,
+        _ => product::Column::Name,
+    };
 
-    let result = half_result.all(&txn).await;
-    match result {
-        Ok(products) => {
-            let response: Vec<PublicProductResponse> = products
-                .into_iter()
-                .map(|prod| PublicProductResponse::new(prod))
-                .collect();
-            return (StatusCode::OK, Json(response)).into_response();
+    condition = condition.add(category::Column::IsAvailable.eq(true));
+
+    //Pagination zone
+    let page: u64 = params.page.unwrap_or(1);
+    let page_size: u64 = params.page_size.unwrap_or(10);
+
+    //Building response
+    let mut items = product::Entity::find();
+
+    //adding query
+    if let Some(query) = params.query {
+        let mut query_condition = Condition::any().add(category::Column::Name.contains(query.clone()));
+        let id_search = query.parse::<u32>().ok();
+        if let Some(id) = id_search {
+            query_condition = query_condition.add(category::Column::Id.eq(id));
         }
-        Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": "Internal server error."
-                })),
-            )
-                .into_response();
-        }
+
+        items = items.filter(query_condition);
     }
+
+    let items = items
+        .filter(condition)
+        .join(JoinType::InnerJoin, product::Relation::Category.def())
+        .column_as(product::Column::Id, "product_id")
+        .column_as(product::Column::Name, "name")
+        .column_as(product::Column::Price, "price")
+        .column_as(product::Column::Description, "description")
+        .column_as(product::Column::ImageId, "image_id")
+        .column_as(category::Column::Name, "category_name")
+        .order_by(sort_column, order)
+        .limit(page_size)
+        .offset((page - 1) * page_size)
+        .into_model::<ProductResponse>()
+        .all(&txn)
+        .await
+        .unwrap_or_else(|_| vec![]);
+
+    Json(items).into_response()
 }
 
 async fn get_product(
@@ -195,12 +223,19 @@ async fn get_product(
     };
     let result = ProductEntity::find_by_id(id)
         .filter(product::Column::IsAvailable.eq(true))
+        .join(JoinType::InnerJoin, product::Relation::Category.def())
+        .column_as(product::Column::Id, "id")
+        .column_as(product::Column::Name, "name")
+        .column_as(product::Column::Price, "price")
+        .column_as(product::Column::Description, "description")
+        .column_as(product::Column::ImageId, "image_id")
+        .column_as(category::Column::Name, "category_name")
+        .into_model::<ProductResponse>()
         .one(&txn)
         .await;
+
     match result {
-        Ok(Some(prod)) => {
-            (StatusCode::OK, Json(PublicProductResponse::new(prod))).into_response()
-        }
+        Ok(Some(prod)) => (StatusCode::OK, Json(prod)).into_response(),
         Ok(None) => (
             StatusCode::BAD_REQUEST,
             Json(json!({
@@ -218,9 +253,8 @@ async fn get_product(
     }
 }
 
-async fn admin_get_product(
-    Query(params): Query<GetProductQuery>,
-    Path(id): Path<i32>,
+async fn admin_get_products(
+    Query(params): Query<AdminProductsQuery>,
     Extension(db): Extension<Arc<DatabaseConnection>>,
 ) -> impl IntoResponse {
     let txn = match db.begin().await {
@@ -235,32 +269,72 @@ async fn admin_get_product(
                 .into_response();
         }
     };
-    let result = ProductEntity::find_by_id(id)
-        .one(&txn)
-        .await;
 
-    match result {
-        Ok(Some(prod)) => match params.full {
-            Some(true) => (StatusCode::OK, Json(prod)).into_response(),
-            Some(false) | None => {
-                (StatusCode::OK, Json(PublicProductResponse::new(prod))).into_response()
-            }
-        },
-        Ok(None) => (
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "error": format!("No category with {} id was found.", id)
-            })),
-        )
-            .into_response(),
-        Err(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({
-                "error": "Internal server error."
-            })),
-        )
-            .into_response(),
+    let mut condition = Condition::all();
+
+    //Filter zone
+    if let Some(price_bottom) = params.price_bottom {
+        condition = condition.add(product::Column::Price.gte(price_bottom));
     }
+    if let Some(price_top) = params.price_top {
+        condition = condition.add(product::Column::Price.lte(price_top));
+    }
+    if let Some(category_ids) = params.category_ids {
+        condition = condition.add(product::Column::CategoryId.is_in(category_ids));
+    }
+    if params.only_available.unwrap_or(false) {
+        condition = condition.add(product::Column::IsAvailable.eq(true));
+    }
+    if params.only_featured.unwrap_or(false) {
+        condition = condition.add(product::Column::IsFeatured.eq(true))
+    }
+
+    //Sorting zone
+    let order = match params.order.as_deref() {
+        Some("desc") => sea_orm::Order::Desc,
+        _ => sea_orm::Order::Asc,
+    };
+
+    let sort_column = match params.sort_by.as_deref() {
+        Some("price") => product::Column::Price,
+        Some("is_available") => product::Column::IsAvailable,
+        Some("is_featured") => product::Column::IsFeatured,
+        Some("name") => product::Column::Name,
+        Some("image_id") => product::Column::ImageId,
+        Some("category_id") => product::Column::CategoryId,
+        _ => product::Column::Id,
+    };
+
+    condition = condition.add(category::Column::IsAvailable.eq(true));
+
+    //Pagination zone
+    let page: u64 = params.page.unwrap_or(1);
+    let page_size: u64 = params.page_size.unwrap_or(10);
+
+    //Response buidling
+    let mut items = product::Entity::find();
+
+    //adding query
+    if let Some(query) = params.query {
+        let mut query_condition = Condition::any().add(category::Column::Name.contains(query.clone()));
+        let id_search = query.parse::<u32>().ok();
+        if let Some(id) = id_search {
+            query_condition = query_condition.add(category::Column::Id.eq(id));
+        }
+
+        items = items.filter(query_condition);
+    }
+
+    let items = items
+        .filter(condition)
+        .order_by(sort_column, order)
+        .limit(page_size)
+        .offset((page - 1) * page_size)
+        .all(&txn)
+        .await
+        .unwrap_or_else(|_| vec![]);
+
+    Json(items).into_response()
 }
 
 async fn patch_product(
@@ -367,7 +441,7 @@ async fn patch_product(
             Json(json!({
                 "error": "Internal server error."
             })),
-        )
+        ),
     }
 }
 
@@ -424,7 +498,7 @@ async fn delete_product(
             Json(json!({
                 "error": "Internal server error."
             })),
-        )
+        ),
     }
 }
 
@@ -442,14 +516,37 @@ struct CreateProduct {
 
 #[derive(Deserialize)]
 struct GetProductsQuery {
-    featured: Option<bool>,
-    min: Option<f32>,
-    max: Option<f32>,
+    //query
+    query: Option<String>,
+    //sort zone
+    sort_by: Option<String>, //Enum better?? "price", "is_available", "name"
+    order: Option<String>,   //Enum better??
+    //filter zone
+    price_top: Option<i32>,
+    price_bottom: Option<i32>,
+    category_ids: Option<Vec<i32>>,
+    only_available: Option<bool>,
+    //pagination zone
+    page: Option<u64>, //required by sea_orm to be u64, why? trait into u64 or something
+    page_size: Option<u64>, //required by sea_orm to be u64, why? trait into u64 or something
 }
 
 #[derive(Deserialize)]
-struct GetProductQuery {
-    full: Option<bool>,
+struct AdminProductsQuery {
+    //query
+    query: Option<String>,
+    //sort zone
+    sort_by: Option<String>, //Enum better?? "id,", "price", "is_available", "is_featured", "name", "image_id", "category_id"
+    order: Option<String>,   //Enum better??
+    //filter zone
+    price_top: Option<i32>,
+    price_bottom: Option<i32>,
+    category_ids: Option<Vec<i32>>,
+    only_available: Option<bool>,
+    only_featured: Option<bool>,
+    //pagination zone
+    page: Option<u64>, //required by sea_orm to be u64, why? trait into u64 or something
+    page_size: Option<u64>, //required by sea_orm to be u64, why? trait into u64 or something
 }
 
 #[derive(Deserialize)]
@@ -463,25 +560,12 @@ struct PatchProductPayload {
     is_available: Option<bool>,
 }
 
-#[derive(Serialize)]
-struct PublicProductResponse {
+#[derive(Serialize, FromQueryResult)]
+struct ProductResponse {
     id: i32,
     name: String,
     price: f32,
     description: String,
     image_id: i32,
-    category_id: i32,
-}
-
-impl PublicProductResponse {
-    fn new(value: product::Model) -> PublicProductResponse {
-        PublicProductResponse {
-            id: value.id,
-            name: value.name,
-            price: value.price,
-            description: value.description,
-            image_id: value.image_id,
-            category_id: value.category_id
-        }
-    }
+    category_name: String,
 }

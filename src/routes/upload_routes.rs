@@ -1,13 +1,17 @@
+use axum::extract::Query;
 use axum::routing::get;
 use axum::{
     extract::{Extension, Multipart, Path},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::IntoResponse,
-    routing::post,
+    routing::{patch, post},
     Json, Router,
 };
-use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set, TransactionTrait};
-use serde::{Deserialize, Serialize};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, Condition, DatabaseConnection, EntityTrait, QueryFilter, Set,
+    TransactionTrait,
+};
+use serde::Deserialize;
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -19,31 +23,24 @@ const FILE_SIZE_LIMIT: usize = 8 * 1024 * 1024 * 8;
 
 use crate::entities::image::FileExtension;
 use crate::entities::{image, image::Entity as ImageEntity, user::Role};
-use crate::middleware::auth::{auth_middleware, AuthState};
+use crate::middleware::auth::auth_middleware;
 
-pub async fn public_image_router(db: Arc<DatabaseConnection>) -> Router {
-    Router::new()
-        .route("/image/:id", get(print_image))
-        .layer(Extension(db))
+//Routers
+pub fn public_image_router() -> Router {
+    Router::new().route("/image/:id", get(print_image))
 }
 
-pub async fn upload_routes(db: Arc<DatabaseConnection>) -> Router {
+pub fn upload_routes() -> Router {
     Router::new()
         .route("/image", post(upload).get(get_images))
-        .route(
-            "/image/:id",
-            get(get_image).patch(patch_image).delete(delete_image),
-        )
+        .route("/image/:id", patch(patch_image).delete(delete_image))
         .layer(axum::middleware::from_fn_with_state(
-            AuthState {
-                db: db.clone(),
-                role: Role::Admin,
-            },
+            Role::Admin,
             auth_middleware,
         ))
-        .layer(Extension(db))
 }
 
+//Routes
 pub async fn print_image(
     Path(id): Path<i32>,
     Extension(db): Extension<Arc<DatabaseConnection>>,
@@ -114,13 +111,6 @@ pub async fn print_image(
     );
 
     Ok((headers, body))
-}
-
-fn allowed_content_types() -> HashMap<&'static str, FileExtension> {
-    HashMap::from([
-        ("image/jpeg", FileExtension::JPG),
-        ("image/png", FileExtension::PNG),
-    ])
 }
 
 async fn upload(
@@ -262,44 +252,9 @@ async fn upload(
     }
 }
 
-async fn get_images(Extension(db): Extension<Arc<DatabaseConnection>>) -> impl IntoResponse {
-    let txn = match db.begin().await {
-        Ok(txn) => txn,
-        Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": "Internal server error"
-                })),
-            )
-                .into_response();
-        }
-    };
-
-    let result = ImageEntity::find().all(&txn).await;
-    match result {
-        Ok(images) => {
-            let response: Vec<ImageResponse> = images
-                .into_iter()
-                .map(|img| ImageResponse::new(img))
-                .collect();
-            return (StatusCode::OK, Json(response)).into_response();
-        }
-        Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": "Internal server error."
-                })),
-            )
-                .into_response();
-        }
-    }
-}
-
-async fn get_image(
-    Path(id): Path<i32>,
+async fn get_images(
     Extension(db): Extension<Arc<DatabaseConnection>>,
+    Query(query): Query<ImagesQuery>,
 ) -> impl IntoResponse {
     let txn = match db.begin().await {
         Ok(txn) => txn,
@@ -314,18 +269,22 @@ async fn get_image(
         }
     };
 
-    let result = ImageEntity::find_by_id(id).one(&txn).await;
+    let filter = if let Some(query) = query.query {
+        let mut query_condition =
+            Condition::any().add(image::Column::FileName.contains(query.clone()));
+        let id_search = query.parse::<u32>().ok();
+        if let Some(id) = id_search {
+            query_condition = query_condition.add(image::Column::Id.eq(id));
+        };
+
+        query_condition
+    } else {
+        Condition::any()
+    }; //will it work?
+
+    let result = ImageEntity::find().filter(filter).all(&txn).await;
     match result {
-        Ok(Some(image)) => {
-            (StatusCode::OK, Json(ImageResponse::new(image))).into_response()
-        }
-        Ok(None) => (
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "error": format!("No image with {} id was found.", id)
-            })),
-        )
-            .into_response(),
+        Ok(images) => (StatusCode::OK, Json(images)).into_response(),
         Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({
@@ -469,24 +428,21 @@ async fn delete_image(
     }
 }
 
-
 //structs
-#[derive(Serialize)]
-struct ImageResponse {
-    id: i32,
-    file_name: String,
-}
-
 #[derive(Deserialize)]
 struct PatchImagePayload {
     file_name: String,
 }
 
-impl ImageResponse {
-    fn new(value: image::Model) -> ImageResponse {
-        ImageResponse {
-            id: value.id,
-            file_name: value.file_name,
-        }
-    }
+#[derive(Deserialize)]
+struct ImagesQuery {
+    query: Option<String>,
+}
+
+//utils
+fn allowed_content_types() -> HashMap<&'static str, FileExtension> {
+    HashMap::from([
+        ("image/jpeg", FileExtension::JPG),
+        ("image/png", FileExtension::PNG),
+    ])
 }

@@ -1,6 +1,8 @@
 Loging middleware
 add regex
 add docs
-add is_deleted to eveything
 add response building
-add pagination
+complete pending api endpoint
+refactor code
+write tests
+refactor tests

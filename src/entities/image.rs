@@ -1,7 +1,8 @@
 use sea_orm::entity::prelude::*;
+use serde::Serialize;
 use std::str::FromStr;
 
-#[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+#[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize)]
 #[sea_orm(table_name = "image")]
 pub struct Model {
     #[sea_orm(primary_key)]
@@ -18,7 +19,7 @@ pub enum Relation {}
 
 impl ActiveModelBehavior for ActiveModel {}
 
-#[derive(Clone, Copy, PartialEq, Debug, EnumIter, DeriveActiveEnum)]
+#[derive(Clone, Copy, PartialEq, Debug, EnumIter, DeriveActiveEnum, Serialize)]
 #[sea_orm(
     enum_name = "extension_enum",
     db_type = "String(StringLen::N(255))",

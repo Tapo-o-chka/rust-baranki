@@ -1,10 +1,11 @@
 use sea_orm::entity::prelude::*;
 use argon2::{password_hash::PasswordVerifier, Argon2, PasswordHash};
+use serde::{Serialize, Deserialize};
 use std::str::FromStr;
 
 //use crate::entity::jwt_token;
 
-#[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+#[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize)]
 #[sea_orm(table_name = "users")]
 pub struct Model {
     #[sea_orm(primary_key)]
@@ -36,7 +37,7 @@ pub enum Relation {}
 
 impl ActiveModelBehavior for ActiveModel {}
 
-#[derive(Clone, Copy, PartialEq, Debug, EnumIter, DeriveActiveEnum)]
+#[derive(Clone, Copy, PartialEq, Debug, EnumIter, DeriveActiveEnum, Deserialize, Serialize)]
 #[sea_orm(
     enum_name = "role_enum",
     db_type = "String(StringLen::N(255))",

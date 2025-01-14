@@ -200,6 +200,7 @@ async fn test_patch_category() {
             .await
             .expect("Failed to send request to protected url");
         assert_eq!(response.status(), StatusCode::OK);
+        
         let body_1 = response
             .json::<CategoryResponse>()
             .await

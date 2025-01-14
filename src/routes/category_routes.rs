@@ -2,45 +2,38 @@ use axum::{
     extract::{Extension, Path, Query},
     http::StatusCode,
     response::IntoResponse,
-    routing::{get, post},
+    routing::{get, patch, post},
     Json, Router,
 };
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set,
-    TransactionTrait,
+    ActiveModelTrait, ColumnTrait, Condition, DatabaseConnection, EntityTrait, QueryFilter,
+    QueryOrder, QuerySelect, Set, TransactionTrait,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
 
 use crate::entities::{category, category::Entity as CategoryEntity, image, user::Role};
-use crate::middleware::auth::{auth_middleware, AuthState};
+use crate::middleware::auth::auth_middleware;
 
 //ROUTERS
-pub async fn category_routes(db: Arc<DatabaseConnection>) -> Router {
+pub fn category_routes() -> Router {
     Router::new()
         .route("/category", get(get_categories))
         .route("/category/:id", get(get_category))
-        .layer(Extension(db))
 }
 
-pub async fn admin_category_routes(db: Arc<DatabaseConnection>) -> Router {
+pub fn admin_category_routes() -> Router {
     Router::new()
-        .route("/category", post(create_category))
+        .route("/category", post(create_category).get(admin_get_categories))
         .route(
             "/category/:id",
-            get(admin_get_category)
-                .patch(patch_category)
-                .delete(delete_category),
+            patch(patch_category).delete(delete_category),
         )
         .layer(axum::middleware::from_fn_with_state(
-            AuthState {
-                db: db.clone(),
-                role: Role::Admin,
-            },
+            Role::Admin,
             auth_middleware,
         ))
-        .layer(Extension(db))
 }
 
 //ROUTES
@@ -168,11 +161,82 @@ async fn get_categories(
     }
 }
 
+async fn admin_get_categories(
+    Query(params): Query<AdminCategoriesQuery>,
+    Extension(db): Extension<Arc<DatabaseConnection>>,
+) -> impl IntoResponse {
+    let txn = match db.begin().await {
+        Ok(txn) => txn,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "Internal server error"
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let mut condition = Condition::all();
+
+    //Filter zone
+    if params.only_available.unwrap_or(false) {
+        condition = condition.add(category::Column::IsAvailable.eq(true));
+    }
+    if params.only_featured.unwrap_or(false) {
+        condition = condition.add(category::Column::IsFeatured.eq(true))
+    }
+
+    //Sorting zone
+    let order = match params.order.as_deref() {
+        Some("desc") => sea_orm::Order::Desc,
+        _ => sea_orm::Order::Asc,
+    };
+
+    let sort_column = match params.sort_by.as_deref() {
+        Some("name") => category::Column::Name,
+        Some("image_id") => category::Column::ImageId,
+        Some("is_available") => category::Column::IsAvailable,
+        Some("is_featured") => category::Column::IsFeatured,
+        _ => category::Column::Id,
+    };
+
+    //Pagination zone
+    let page: u64 = params.page.unwrap_or(1);
+    let page_size: u64 = params.page_size.unwrap_or(10);
+
+    let mut half_items = category::Entity::find();
+
+    //Adding query
+    if let Some(query) = params.query {
+        let mut query_condition = Condition::any().add(category::Column::Name.contains(query.clone()));
+        let id_search = query.parse::<u32>().ok();
+        if let Some(id) = id_search {
+            query_condition = query_condition.add(category::Column::Id.eq(id));
+        }
+
+        half_items = half_items.filter(query_condition); //ahh adding filter after column definitions and ordering, hate that
+    }
+
+    //Just put it in the same variable!!!
+    let items = half_items
+        .filter(condition)
+        .order_by(sort_column, order)
+        .limit(page_size)
+        .offset((page - 1) * page_size)
+        .all(&txn)
+        .await
+        .unwrap_or_else(|_| vec![]);
+
+    Json(items).into_response()
+}
+
 async fn get_category(
     Path(id): Path<i32>,
     Extension(db): Extension<Arc<DatabaseConnection>>,
 ) -> impl IntoResponse {
-    println!("->> Called `create_category()`",);
+    println!("->> Called `get_category()`",);
     let txn = match db.begin().await {
         Ok(txn) => txn,
         Err(_) => {
@@ -196,48 +260,6 @@ async fn get_category(
         }
         Ok(None) => (
             StatusCode::NOT_FOUND,
-            Json(json!({
-                "error": format!("No category with {} id was found.", id)
-            })),
-        )
-            .into_response(),
-        Err(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({
-                "error": "Internal server error."
-            })),
-        )
-            .into_response(),
-    }
-}
-
-async fn admin_get_category(
-    Query(params): Query<GetCategoryQuery>,
-    Path(id): Path<i32>,
-    Extension(db): Extension<Arc<DatabaseConnection>>,
-) -> impl IntoResponse {
-    let txn = match db.begin().await {
-        Ok(txn) => txn,
-        Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": "Internal server error"
-                })),
-            )
-                .into_response();
-        }
-    };
-    let result = CategoryEntity::find_by_id(id).one(&txn).await;
-    match result {
-        Ok(Some(categor)) => match params.full {
-            Some(true) => (StatusCode::OK, Json(categor)).into_response(),
-            Some(false) | None => {
-                (StatusCode::OK, Json(PublicCategoryResponse::new(categor))).into_response()
-            }
-        },
-        Ok(None) => (
-            StatusCode::BAD_REQUEST,
             Json(json!({
                 "error": format!("No category with {} id was found.", id)
             })),
@@ -406,13 +428,23 @@ struct CreateCategory {
 }
 
 #[derive(Deserialize)]
-struct GetCategoryQuery {
-    full: Option<bool>,
+struct GetCategoriesQuery {
+    featured: Option<bool>,
 }
 
 #[derive(Deserialize)]
-struct GetCategoriesQuery {
-    featured: Option<bool>,
+struct AdminCategoriesQuery {
+    //query
+    query: Option<String>,
+    //sort zone
+    sort_by: Option<String>, //Enum better? "id", "name", "image_id", "is_featured", "is_available"
+    order: Option<String>,   //Enum better? "desc" / "asc"
+    //filter zone
+    only_featured: Option<bool>,
+    only_available: Option<bool>,
+    //pagination zone
+    page: Option<u64>, //required by sea_orm to be u64, why? trait into u64 or something
+    page_size: Option<u64>, //required by sea_orm to be u64, why? trait into u64 or something
 }
 
 #[derive(Deserialize)]

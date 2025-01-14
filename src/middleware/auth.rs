@@ -3,7 +3,7 @@ use axum::{
     extract::{Request, State},
     http::StatusCode,
     middleware::Next,
-    response::Response,
+    response::Response, Extension,
 };
 use chrono::{Duration, Utc};
 use dotenvy::dotenv;
@@ -13,13 +13,13 @@ use serde::{Deserialize, Serialize};
 use std::{str::FromStr, sync::Arc};
 
 pub async fn auth_middleware(
-    State(state): State<AuthState>,
+    State(state): State<Role>,
+    Extension(db): Extension<Arc<DatabaseConnection>>,
     mut req: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
     println!("Loaded middleware.");
-    let db = state.db;
-    let role = state.role;
+    let role = state;
 
     println!("Loaded states.");
     let auth_header = req
@@ -58,12 +58,6 @@ pub struct Claims {
     pub user_id: i32,
     pub role: String,
     pub exp: usize,
-}
-
-#[derive(Clone, Debug)]
-pub struct AuthState {
-    pub db: Arc<DatabaseConnection>,
-    pub role: Role,
 }
 
 pub async fn generate_token(user_id: i32, role: String) -> Result<String, AuthMiddlewareError> {

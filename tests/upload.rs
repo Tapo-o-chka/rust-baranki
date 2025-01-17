@@ -10,7 +10,7 @@ async fn test_upload_image() {
     // Step 1: Login as Admin
     let login_payload = json!({
         "username": "admin",
-        "password": "12345"
+        "password": "Muzion15"
     });
 
     let login_response = client
@@ -60,7 +60,7 @@ async fn test_get_image_by_id() {
     // Step 1: Login as Admin
     let login_payload = json!({
         "username": "admin",
-        "password": "12345"
+        "password": "Muzion15"
     });
 
     let login_response = client
@@ -115,7 +115,7 @@ async fn test_patch_image() {
     // Step 1: Login as Admin
     let login_payload = json!({
         "username": "admin",
-        "password": "12345"
+        "password": "Muzion15"
     });
 
     let login_response = client
@@ -171,7 +171,7 @@ async fn test_delete_image() {
     // Step 1: Login as Admin
     let login_payload = json!({
         "username": "admin",
-        "password": "12345"
+        "password": "Muzion15"
     });
 
     let login_response = client

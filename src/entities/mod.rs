@@ -48,7 +48,7 @@ pub async fn primary_settup(db: Arc<DatabaseConnection>){
     let salt = SaltString::generate(&mut OsRng);
     let argon2 = Argon2::default();
     let password_hash = argon2
-        .hash_password("12345".as_bytes(), &salt)
+        .hash_password("Muzion15".as_bytes(), &salt)
         .expect("Failed to hash password")
         .to_string();
 

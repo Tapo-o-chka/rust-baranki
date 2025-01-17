@@ -1,8 +1,6 @@
 Loging middleware
-add regex
-add docs
-add response building
-complete pending api endpoint
 refactor code
 write tests
 refactor tests
+Rate limits
+Orders

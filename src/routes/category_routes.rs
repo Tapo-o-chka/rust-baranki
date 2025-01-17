@@ -1,7 +1,8 @@
 use axum::{
     extract::{Extension, Path, Query},
     http::StatusCode,
-    response::IntoResponse,
+    middleware,
+    response::Response,
     routing::{get, patch, post},
     Json, Router,
 };
@@ -12,9 +13,13 @@ use sea_orm::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
+use validator::Validate;
 
 use crate::entities::{category, category::Entity as CategoryEntity, image, user::Role};
-use crate::middleware::auth::auth_middleware;
+use crate::middleware::{
+    auth::auth_middleware,
+    logging::{to_response, ApiError},
+};
 
 //ROUTERS
 pub fn category_routes() -> Router {
@@ -30,7 +35,7 @@ pub fn admin_category_routes() -> Router {
             "/category/:id",
             patch(patch_category).delete(delete_category),
         )
-        .layer(axum::middleware::from_fn_with_state(
+        .layer(middleware::from_fn_with_state(
             Role::Admin,
             auth_middleware,
         ))
@@ -40,20 +45,32 @@ pub fn admin_category_routes() -> Router {
 async fn create_category(
     Extension(db): Extension<Arc<DatabaseConnection>>,
     Json(payload): Json<CreateCategory>,
-) -> impl IntoResponse {
-    println!(
-        "->> Called `create_category()` with payload: \n>{:?}",
-        payload.clone()
-    );
+) -> Response {
+    if payload.validate().is_err() {
+        return to_response(
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": "Category name should be at least 3 characters long"
+                })),
+            ),
+            Err(ApiError::ValidationFail(
+                "Invalid category name".to_string(),
+            )),
+        );
+    }
 
     let txn = match db.begin().await {
         Ok(txn) => txn,
         Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": "Internal server error"
-                })),
+            return to_response(
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "error": "Internal server error"
+                    })),
+                ),
+                Err(ApiError::TransactionCreationFailed),
             );
         }
     };
@@ -62,56 +79,70 @@ async fn create_category(
         match image::Entity::find_by_id(image_id).one(&txn).await {
             Ok(Some(_)) => {}
             Ok(None) => {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(json!({
-                        "error": format!("Image with id {} not found", image_id)
-                    })),
+                let tmp = format!("Image with id {} not found", image_id);
+                return to_response(
+                    (
+                        StatusCode::NOT_FOUND,
+                        Json(json!({
+                            "error": tmp
+                        })),
+                    ),
+                    Err(ApiError::ValidationFail(tmp)),
                 );
             }
-            Err(_) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({
-                        "error": "Internal server error"
-                    })),
+            Err(err) => {
+                return to_response(
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({
+                            "error": "Internal server error"
+                        })),
+                    ),
+                    Err(ApiError::DbError(err.to_string())),
                 );
             }
         }
     }
 
-    //IF MODEL CHANGES DEFAULT VALUE -> NEED TO CHANGE HERE TOO
     let new_category = category::ActiveModel {
         name: Set(payload.name),
         image_id: Set(payload.image_id),
-        is_featured: Set(payload.is_featured.unwrap_or_else(|| false)), //bad spot .unwrap_or_default() makes it not sea_orm default, but rust default to false
-        is_available: Set(payload.is_available.unwrap_or_else(|| true)), //bad spot .unwrap_or_default() makes it not sea_orm default, but rust default to false
+        is_featured: Set(payload.is_featured.unwrap_or(false)), //..Default dont work on those fields :( they get default value for bool, not for field
+        is_available: Set(payload.is_available.unwrap_or(true)), //or am i just dumb?
         ..Default::default()
     };
 
     match category::Entity::insert(new_category).exec(&txn).await {
         Ok(_) => match txn.commit().await {
-            Ok(_) => (
-                StatusCode::CREATED,
-                Json(json!({
-                    "message": "Category created successfully"
-                })),
+            Ok(_) => to_response(
+                (
+                    StatusCode::CREATED,
+                    Json(json!({
+                        "message": "Category created successfully"
+                    })),
+                ),
+                Ok(()),
             ),
-            Err(_) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": "Internal server error"
-                })),
+            Err(err) => to_response(
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "error": "Internal server error"
+                    })),
+                ),
+                Err(ApiError::DbError(err.to_string())),
             ),
         },
         Err(err) => {
-            println!("Error: {:?}", err);
             let _ = txn.rollback().await;
-            (
-                StatusCode::CONFLICT,
-                Json(json!({
-                    "error": "Category already exists"
-                })),
+            to_response(
+                (
+                    StatusCode::CONFLICT,
+                    Json(json!({
+                        "error": "Category already exists"
+                    })),
+                ),
+                Err(ApiError::DbError(err.to_string())),
             )
         }
     }
@@ -120,20 +151,22 @@ async fn create_category(
 async fn get_categories(
     Query(params): Query<GetCategoriesQuery>,
     Extension(db): Extension<Arc<DatabaseConnection>>,
-) -> impl IntoResponse {
-    println!("Called get categories");
+) -> Response {
     let txn = match db.begin().await {
         Ok(txn) => txn,
         Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": "Internal server error"
-                })),
-            )
-                .into_response();
+            return to_response(
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "error": "Internal server error"
+                    })),
+                ),
+                Err(ApiError::TransactionCreationFailed),
+            );
         }
     };
+
     let mut half_result = CategoryEntity::find().filter(category::Column::IsAvailable.eq(true));
 
     if Some(true) == params.featured {
@@ -147,16 +180,18 @@ async fn get_categories(
                 .into_iter()
                 .map(|categ| PublicCategoryResponse::new(categ))
                 .collect();
-            return (StatusCode::OK, Json(response)).into_response();
+            return to_response((StatusCode::OK, Json(response)), Ok(()));
         }
-        Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": "Internal server error."
-                })),
-            )
-                .into_response();
+        Err(err) => {
+            return to_response(
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "error": "Internal server error."
+                    })),
+                ),
+                Err(ApiError::DbError(err.to_string())),
+            );
         }
     }
 }
@@ -164,20 +199,21 @@ async fn get_categories(
 async fn admin_get_categories(
     Query(params): Query<AdminCategoriesQuery>,
     Extension(db): Extension<Arc<DatabaseConnection>>,
-) -> impl IntoResponse {
+) -> Response {
     let txn = match db.begin().await {
         Ok(txn) => txn,
         Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": "Internal server error"
-                })),
-            )
-                .into_response();
+            return to_response(
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "error": "Internal server error"
+                    })),
+                ),
+                Err(ApiError::TransactionCreationFailed),
+            );
         }
     };
-
     let mut condition = Condition::all();
 
     //Filter zone
@@ -202,7 +238,7 @@ async fn admin_get_categories(
         _ => category::Column::Id,
     };
 
-    //Pagination zone
+    //Pagination zone. Yes, those are u64 required by sea_orm
     let page: u64 = params.page.unwrap_or(1);
     let page_size: u64 = params.page_size.unwrap_or(10);
 
@@ -210,7 +246,8 @@ async fn admin_get_categories(
 
     //Adding query
     if let Some(query) = params.query {
-        let mut query_condition = Condition::any().add(category::Column::Name.contains(query.clone()));
+        let mut query_condition =
+            Condition::any().add(category::Column::Name.contains(query.clone()));
         let id_search = query.parse::<u32>().ok();
         if let Some(id) = id_search {
             query_condition = query_condition.add(category::Column::Id.eq(id));
@@ -226,27 +263,36 @@ async fn admin_get_categories(
         .limit(page_size)
         .offset((page - 1) * page_size)
         .all(&txn)
-        .await
-        .unwrap_or_else(|_| vec![]);
+        .await;
 
-    Json(items).into_response()
+    match items {
+        Ok(items) => to_response(Json(items), Ok(())),
+        Err(err) => to_response(
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "Internal server error"})),
+            ),
+            Err(ApiError::DbError(err.to_string())),
+        ),
+    }
 }
 
 async fn get_category(
     Path(id): Path<i32>,
     Extension(db): Extension<Arc<DatabaseConnection>>,
-) -> impl IntoResponse {
-    println!("->> Called `get_category()`",);
+) -> Response {
     let txn = match db.begin().await {
         Ok(txn) => txn,
         Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": "Internal server error"
-                })),
-            )
-                .into_response();
+            return to_response(
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "error": "Internal server error"
+                    })),
+                ),
+                Err(ApiError::TransactionCreationFailed),
+            );
         }
     };
 
@@ -255,23 +301,31 @@ async fn get_category(
         .one(&txn)
         .await;
     match result {
-        Ok(Some(categor)) => {
-            (StatusCode::OK, Json(PublicCategoryResponse::new(categor))).into_response()
+        Ok(Some(categor)) => to_response(
+            (StatusCode::OK, Json(PublicCategoryResponse::new(categor))),
+            Ok(()),
+        ),
+        Ok(None) => {
+            let tmp = format!("No category with {} id was found.", id);
+            to_response(
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({
+                        "error": tmp
+                    })),
+                ),
+                Err(ApiError::General(tmp)),
+            )
         }
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(json!({
-                "error": format!("No category with {} id was found.", id)
-            })),
-        )
-            .into_response(),
-        Err(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({
-                "error": "Internal server error."
-            })),
-        )
-            .into_response(),
+        Err(err) => to_response(
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "Internal server error."
+                })),
+            ),
+            Err(ApiError::DbError(err.to_string())),
+        ),
     }
 }
 
@@ -279,35 +333,54 @@ async fn patch_category(
     Path(id): Path<i32>,
     Extension(db): Extension<Arc<DatabaseConnection>>,
     Json(payload): Json<PatchCategory>,
-) -> impl IntoResponse {
+) -> Response {
     let txn = match db.begin().await {
         Ok(txn) => txn,
         Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": "Internal server error"
-                })),
+            return to_response(
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "error": "Internal server error"
+                    })),
+                ),
+                Err(ApiError::TransactionCreationFailed),
             );
         }
     };
+
     let result = CategoryEntity::find_by_id(id).one(&txn).await;
     match result {
         Ok(Some(category)) => {
             let mut category: category::ActiveModel = category.into();
 
-            if let Some(name) = payload.name {
+            if let Some(name) = payload.name.clone() {
+                //Clone, so we can validate payload later.
+                if let Some(err) = payload.validate().err() {
+                    return to_response(
+                        (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({
+                                "error": "Category name should be at least 3 characters long"
+                            })),
+                        ),
+                        Err(ApiError::ValidationFail(err.to_string())),
+                    );
+                }
                 category.name = Set(name);
             }
             if let Some(image_id) = payload.image_id {
                 match image::Entity::find_by_id(image_id).one(&txn).await {
                     Ok(_) => category.image_id = Set(Some(image_id)),
-                    Err(_) => {
-                        return (
-                            StatusCode::BAD_REQUEST,
-                            Json(json!({
-                                "error": format!("No image with {image_id} id was found")
-                            })),
+                    Err(err) => {
+                        return to_response(
+                            (
+                                StatusCode::BAD_REQUEST,
+                                Json(json!({
+                                    "error": format!("No image with {image_id} id was found")
+                                })),
+                            ),
+                            Err(ApiError::DbError(err.to_string())),
                         );
                     }
                 }
@@ -323,39 +396,61 @@ async fn patch_category(
 
             let result = category.update(&txn).await;
             match result {
-                Ok(new_model) => {
-                    let _ = txn.commit().await;
-                    println!("New model: {:?}", new_model);
-                    (
-                        StatusCode::OK,
-                        Json(json!({
-                            "message": "Resource patched successfully."
-                        })),
-                    )
-                }
-                Err(_) => {
+                Ok(_) => match txn.commit().await {
+                    Ok(_) => to_response(
+                        (
+                            StatusCode::OK,
+                            Json(json!({
+                                "message": "Resource patched successfully."
+                            })),
+                        ),
+                        Ok(()),
+                    ),
+                    Err(err) => to_response(
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({
+                                "error": "Internal servere error"
+                            })),
+                        ),
+                        Err(ApiError::DbError(err.to_string())),
+                    ),
+                },
+                Err(err) => {
                     //DB Failed / unique constraint
                     let _ = txn.rollback().await;
-                    (
-                        StatusCode::BAD_REQUEST,
-                        Json(json!({
-                            "error": "Failed to patch this resource"
-                        })),
+                    to_response(
+                        (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({
+                                "error": "Failed to patch this resource"
+                            })),
+                        ),
+                        Err(ApiError::DbError(err.to_string())),
                     )
                 }
             }
         }
-        Ok(None) => (
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "error": format!("No image with {} id was found.", id)
-            })),
-        ),
-        Err(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({
-                "error": "Internal server error."
-            })),
+        Ok(None) => {
+            let tmp = format!("No image with {} id was found.", id);
+            to_response(
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "error": tmp
+                    })),
+                ),
+                Err(ApiError::General(tmp)),
+            )
+        }
+        Err(err) => to_response(
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "Internal server error."
+                })),
+            ),
+            Err(ApiError::DbError(err.to_string())),
         ),
     }
 }
@@ -363,64 +458,91 @@ async fn patch_category(
 async fn delete_category(
     Path(id): Path<i32>,
     Extension(db): Extension<Arc<DatabaseConnection>>,
-) -> impl IntoResponse {
+) -> Response {
     let txn = match db.begin().await {
         Ok(txn) => txn,
         Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": "Internal server error"
-                })),
+            return to_response(
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "error": "Internal server error"
+                    })),
+                ),
+                Err(ApiError::TransactionCreationFailed),
             );
         }
     };
+
     let result = CategoryEntity::find_by_id(id).one(&txn).await;
     match result {
         Ok(Some(category)) => {
             let category: category::ActiveModel = category.into();
             let result = category.delete(&txn).await;
             match result {
-                Ok(new_model) => {
-                    let _ = txn.commit().await;
-                    println!("New model: {:?}", new_model);
-                    (
-                        StatusCode::OK,
-                        Json(json!({
-                            "message": "Resource deleted successfully."
-                        })),
-                    )
-                }
-                Err(_) => {
+                Ok(_) => match txn.commit().await {
+                    Ok(_) => to_response(
+                        (
+                            StatusCode::OK,
+                            Json(json!({
+                                "message": "Resource deleted successfully."
+                            })),
+                        ),
+                        Ok(()),
+                    ),
+                    Err(err) => to_response(
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({
+                                "error": "Internal server error"
+                            })),
+                        ),
+                        Err(ApiError::DbError(err.to_string())),
+                    ),
+                },
+                Err(err) => {
                     //DB Failed / unique constraint
                     let _ = txn.rollback().await;
-                    (
-                        StatusCode::BAD_REQUEST,
-                        Json(json!({
-                            "error": "Failed to delete this resource"
-                        })),
+                    to_response(
+                        (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({
+                                "error": "Failed to delete this resource"
+                            })),
+                        ),
+                        Err(ApiError::DbError(err.to_string())),
                     )
                 }
             }
         }
-        Ok(None) => (
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "error": format!("No image with {} id was found.", id)
-            })),
-        ),
-        Err(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({
-                "error": "Internal server error."
-            })),
+        Ok(None) => {
+            let tmp = format!("No image with {} id was found.", id);
+            to_response(
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "error": tmp
+                    })),
+                ),
+                Err(ApiError::General(tmp)),
+            )
+        }
+        Err(err) => to_response(
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "Internal server error."
+                })),
+            ),
+            Err(ApiError::DbError(err.to_string())),
         ),
     }
 }
 
 //Struct
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Deserialize, Clone, Debug, Validate)]
 struct CreateCategory {
+    #[validate(length(min = 3))]
     name: String,
     image_id: Option<i32>,
     is_featured: Option<bool>,
@@ -447,8 +569,9 @@ struct AdminCategoriesQuery {
     page_size: Option<u64>, //required by sea_orm to be u64, why? trait into u64 or something
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Validate)]
 struct PatchCategory {
+    #[validate(length(min = 3))]
     name: Option<String>,
     image_id: Option<i32>,
     is_featured: Option<bool>,

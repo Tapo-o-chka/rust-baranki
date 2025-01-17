@@ -47,7 +47,7 @@ async fn test_login() {
     let client = Client::new();
 
     let payload = serde_json::json!({
-        "username": "JohnDoe",
+        "username": "user",
         "password": "Muzion15"
     });
 
@@ -76,7 +76,7 @@ async fn test_login() {
                 .expect("Failed to insert header"),
         );
         let response = client
-            .get("http://127.0.0.1:3000/protected")
+            .get("http://127.0.0.1:3000/api/profile")
             .headers(headers)
             .send()
             .await
@@ -97,7 +97,7 @@ async fn test_login() {
                 .expect("Failed to insert header"),
         );
         let response = client
-            .get("http://127.0.0.1:3000/protected")
+            .get("http://127.0.0.1:3000/api/profile")
             .headers(wrong_headers)
             .send()
             .await
@@ -107,7 +107,7 @@ async fn test_login() {
     }
     //TESING WITHOUT HEADER
     let response = client
-        .get("http://127.0.0.1:3000/protected")
+        .get("http://127.0.0.1:3000/api/profile")
         .send()
         .await
         .expect("Failed to send request to protected url");

@@ -1,7 +1,8 @@
 use axum::{
     extract::{Extension, Path, Query},
     http::StatusCode,
-    response::IntoResponse,
+    middleware,
+    response::Response,
     routing::{get, patch},
     Json, Router,
 };
@@ -16,17 +17,17 @@ use std::sync::Arc;
 
 use crate::entities::user::Role;
 use crate::entities::{cart, cart::Entity as CartEntity, category, product, user};
-use crate::middleware::auth::{auth_middleware, Claims};
+use crate::middleware::{
+    auth::{auth_middleware, Claims},
+    logging::{to_response, ApiError},
+};
 
 //ROUTERS
 pub fn cart_routes() -> Router {
     Router::new()
         .route("/cart", get(get_cart).post(add_product))
         .route("/cart/:id", patch(patch_entry).delete(remove_product))
-        .layer(axum::middleware::from_fn_with_state(
-            Role::User,
-            auth_middleware,
-        ))
+        .layer(middleware::from_fn_with_state(Role::User, auth_middleware))
 }
 
 pub fn admin_cart_routes() -> Router {
@@ -36,10 +37,7 @@ pub fn admin_cart_routes() -> Router {
             "/cart:id",
             patch(admin_remove_product).post(admin_patch_cart_entry),
         )
-        .layer(axum::middleware::from_fn_with_state(
-            Role::Admin,
-            auth_middleware,
-        ))
+        .layer(middleware::from_fn_with_state(Role::Admin, auth_middleware))
 }
 
 //Routes
@@ -47,18 +45,20 @@ async fn get_cart(
     Extension(db): Extension<Arc<DatabaseConnection>>,
     Extension(claims): Extension<Claims>,
     Query(query): Query<CartQuery>,
-) -> impl IntoResponse {
+) -> Response {
     let user_id = claims.user_id;
     let txn = match db.begin().await {
         Ok(txn) => txn,
         Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": "Internal server error"
-                })),
-            )
-                .into_response();
+            return to_response(
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "error": "Internal server error"
+                    })),
+                ),
+                Err(ApiError::TransactionCreationFailed),
+            );
         }
     };
 
@@ -136,34 +136,38 @@ async fn get_cart(
         .await
         .unwrap_or_else(|_| vec![]);
 
-    Json(items).into_response()
+    to_response(Json(items), Ok(()))
 }
 
 async fn add_product(
     Extension(db): Extension<Arc<DatabaseConnection>>,
     Extension(claims): Extension<Claims>,
     Json(payload): Json<AddProduct>,
-) -> impl IntoResponse {
-    //too nested
-    println!("->> Called `add_product` with payload: {:?}", payload);
+) -> Response {
     let user_id = claims.user_id;
     let txn = match db.begin().await {
         Ok(txn) => txn,
         Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": "Internal server error"
-                })),
+            return to_response(
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "error": "Internal server error"
+                    })),
+                ),
+                Err(ApiError::TransactionCreationFailed),
             );
         }
     };
+
+    //Nested as hell
     match product::Entity::find_by_id(payload.product_id)
         .one(&txn)
         .await
     {
         Ok(Some(_)) => {
             if payload.quantity > 0 {
+                //If entry already exist in db, so we would expand it, instead of creating second one.
                 if let Ok(Some(entry)) = CartEntity::find()
                     .filter(cart::Column::ProductId.eq(payload.product_id))
                     .filter(cart::Column::UserId.eq(user_id))
@@ -175,21 +179,37 @@ async fn add_product(
                     let result = entry.update(&txn).await.map(|_| ());
                     match result {
                         Ok(_) => {
-                            let _ = txn.commit().await;
-                            return (
-                                StatusCode::OK,
-                                Json(json!({
-                                    "message": "Resource patched successfully"
-                                })),
-                            );
+                            return match txn.commit().await {
+                                Ok(_) => to_response(
+                                    (
+                                        StatusCode::OK,
+                                        Json(json!({
+                                            "message": "Resource patched successfully"
+                                        })),
+                                    ),
+                                    Ok(()),
+                                ),
+                                Err(err) => to_response(
+                                    (
+                                        StatusCode::INTERNAL_SERVER_ERROR,
+                                        Json(json!({
+                                            "error": "Internal server error"
+                                        })),
+                                    ),
+                                    Err(ApiError::DbError(err.to_string())),
+                                ),
+                            };
                         }
-                        Err(_) => {
+                        Err(err) => {
                             let _ = txn.rollback().await;
-                            return (
-                                StatusCode::BAD_REQUEST,
-                                Json(json!({
-                                    "error": "Failed to patch this resource"
-                                })),
+                            return to_response(
+                                (
+                                    StatusCode::BAD_REQUEST,
+                                    Json(json!({
+                                        "error": "Failed to patch this resource"
+                                    })),
+                                ),
+                                Err(ApiError::DbError(err.to_string())),
                             );
                         }
                     };
@@ -202,61 +222,72 @@ async fn add_product(
                 };
                 match CartEntity::insert(new_entry).exec(&txn).await {
                     Ok(_) => match txn.commit().await {
-                        Ok(_) => (
-                            StatusCode::CREATED,
-                            Json(json!({
-                                "message": "Added successfully"
-                            })),
+                        Ok(_) => to_response(
+                            (
+                                StatusCode::CREATED,
+                                Json(json!({
+                                    "message": "Added successfully"
+                                })),
+                            ),
+                            Ok(()),
                         ),
-                        Err(_) => {
-                            println!("Failed to commit");
+                        Err(err) => to_response(
                             (
                                 StatusCode::INTERNAL_SERVER_ERROR,
                                 Json(json!({
                                     "error": "Internal server error"
                                 })),
-                            )
-                        }
+                            ),
+                            Err(ApiError::DbError(err.to_string())),
+                        ),
                     },
-                    Err(_) => {
-                        println!("Internal server error on adding cart entry");
+                    Err(err) => {
                         let _ = txn.rollback().await;
-                        (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(json!({
-                                "error": "Internal server error"
-                            })),
+                        to_response(
+                            (
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                Json(json!({
+                                    "error": "Internal server error"
+                                })),
+                            ),
+                            Err(ApiError::DbError(err.to_string())),
                         )
                     }
                 }
             } else {
-                println!("Error: quanity should be greater thatn 0");
-                (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({
-                        "error": "Quantity should be greater than 0"
-                    })),
+                let tmp = "Quantity should be greater than 0".to_owned();
+                to_response(
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({
+                            "error": tmp
+                        })),
+                    ),
+                    Err(ApiError::General(tmp)),
                 )
             }
         }
         Ok(None) => {
-            println!("Error: no product found");
-            (
-                StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "error": format!("No product with {} id was found", payload.product_id)
-                })),
+            let tmp = format!("No product with {} id was found", payload.product_id);
+            to_response(
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "error": tmp
+                    })),
+                ),
+                Err(ApiError::General(tmp)),
             )
         }
-        Err(_) => {
-            println!("Db search failed??");
+        Err(err) => to_response(
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({
                     "error": "Internal server error."
                 })),
-            )
-        }
+            ),
+            Err(ApiError::DbError(err.to_string())),
+        ),
     }
 }
 
@@ -264,16 +295,19 @@ async fn remove_product(
     Path(id): Path<i32>,
     Extension(claims): Extension<Claims>,
     Extension(db): Extension<Arc<DatabaseConnection>>,
-) -> impl IntoResponse {
+) -> Response {
     let user_id = claims.user_id;
     let txn = match db.begin().await {
         Ok(txn) => txn,
         Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": "Internal server error"
-                })),
+            return to_response(
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "error": "Internal server error"
+                    })),
+                ),
+                Err(ApiError::TransactionCreationFailed),
             );
         }
     };
@@ -285,39 +319,64 @@ async fn remove_product(
     {
         Ok(Some(entry)) => {
             let entry: cart::ActiveModel = entry.into();
-            let result = entry.delete(&txn).await;
-            match result {
+            match entry.delete(&txn).await {
                 Ok(_) => {
-                    let _ = txn.commit().await;
-                    (
-                        StatusCode::OK,
-                        Json(json!({
-                            "message": "Resource deleted successfully"
-                        })),
-                    )
+                    if txn.commit().await.is_ok() {
+                        to_response(
+                            (
+                                StatusCode::OK,
+                                Json(json!({
+                                    "message": "Resource deleted successfully"
+                                })),
+                            ),
+                            Ok(()),
+                        )
+                    } else {
+                        to_response(
+                            (
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                Json(json!({
+                                    "error": "Failed to commit transaction"
+                                })),
+                            ),
+                            Err(ApiError::TransactionCreationFailed),
+                        )
+                    }
                 }
-                Err(_) => {
+                Err(err) => {
                     let _ = txn.rollback().await;
-                    (
-                        StatusCode::BAD_REQUEST,
-                        Json(json!({
-                            "error": "Failed to delete this resource"
-                        })),
+                    to_response(
+                        (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({
+                                "error": "Failed to delete this resource"
+                            })),
+                        ),
+                        Err(ApiError::DbError(err.to_string())),
                     )
                 }
             }
         }
-        Ok(None) => (
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "error": format!("No related entry with {} id was found.", id)
-            })),
+        Ok(None) => to_response(
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": format!("No related entry with {} id was found.", id)
+                })),
+            ),
+            Err(ApiError::ValidationFail(format!(
+                "No entry found for id {}",
+                id
+            ))),
         ),
-        Err(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({
-                "error": "Internal server error."
-            })),
+        Err(err) => to_response(
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "Internal server error."
+                })),
+            ),
+            Err(ApiError::DbError(err.to_string())),
         ),
     }
 }
@@ -327,16 +386,19 @@ async fn patch_entry(
     Extension(claims): Extension<Claims>,
     Extension(db): Extension<Arc<DatabaseConnection>>,
     Json(payload): Json<PatchCart>,
-) -> impl IntoResponse {
+) -> Response {
     let user_id = claims.user_id;
     let txn = match db.begin().await {
         Ok(txn) => txn,
         Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": "Internal server error"
-                })),
+            return to_response(
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "error": "Internal server error"
+                    })),
+                ),
+                Err(ApiError::TransactionCreationFailed),
             );
         }
     };
@@ -357,37 +419,60 @@ async fn patch_entry(
                 }
             };
             match result {
-                Ok(_) => {
-                    let _ = txn.commit().await;
-                    (
-                        StatusCode::OK,
-                        Json(json!({
-                            "message": "Resource patched successfully"
-                        })),
-                    )
-                }
-                Err(_) => {
+                Ok(_) => match txn.commit().await {
+                    Ok(_) => to_response(
+                        (
+                            StatusCode::OK,
+                            Json(json!({
+                                "message": "Resource patched successfully"
+                            })),
+                        ),
+                        Ok(()),
+                    ),
+                    Err(err) => to_response(
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({
+                                "error": "Internal server error"
+                            })),
+                        ),
+                        Err(ApiError::DbError(err.to_string())),
+                    ),
+                },
+                Err(err) => {
                     let _ = txn.rollback().await;
-                    (
-                        StatusCode::BAD_REQUEST,
-                        Json(json!({
-                            "error": "Failed to patch this resource"
-                        })),
+                    to_response(
+                        (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({
+                                "error": "Failed to patch this resource"
+                            })),
+                        ),
+                        Err(ApiError::DbError(err.to_string())),
                     )
                 }
             }
         }
-        Ok(None) => (
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "error": format!("No related entry with {} id was found.", id)
-            })),
-        ),
-        Err(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({
-                "error": "Internal server error."
-            })),
+        Ok(None) => {
+            let tmp = format!("No related entry with {} id was found.", id);
+            to_response(
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "error": tmp
+                    })),
+                ),
+                Err(ApiError::General(tmp)),
+            )
+        }
+        Err(err) => to_response(
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "Internal server error."
+                })),
+            ),
+            Err(ApiError::DbError(err.to_string())),
         ),
     }
 }
@@ -395,17 +480,19 @@ async fn patch_entry(
 async fn get_carts(
     Extension(db): Extension<Arc<DatabaseConnection>>,
     Query(query): Query<AdminCartsQuery>,
-) -> impl IntoResponse {
+) -> Response {
     let txn = match db.begin().await {
         Ok(txn) => txn,
         Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": "Internal server error"
-                })),
-            )
-                .into_response();
+            return to_response(
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "error": "Internal server error"
+                    })),
+                ),
+                Err(ApiError::TransactionCreationFailed),
+            );
         }
     };
 
@@ -440,14 +527,16 @@ async fn get_carts(
 
     let users = match user_finder.order_by(sort_users, order).all(&txn).await {
         Ok(value) => value,
-        Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": "Internal server error"
-                })),
-            )
-                .into_response();
+        Err(err) => {
+            return to_response(
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "error": "Internal server error"
+                    })),
+                ),
+                Err(ApiError::DbError(err.to_string())),
+            );
         }
     };
 
@@ -474,15 +563,16 @@ async fn get_carts(
             .await
         {
             Ok(result) => result,
-            Err(_) => {
-                println!("Giant ass query went wrong");
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({
-                        "error": "Internal server error"
-                    })),
-                )
-                    .into_response();
+            Err(err) => {
+                return to_response(
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({
+                            "error": "Internal server error"
+                        })),
+                    ),
+                    Err(ApiError::DbError(err.to_string())),
+                );
             }
         };
 
@@ -544,22 +634,25 @@ async fn get_carts(
             total_available,
         });
     }
-    Json(user_cart_list).into_response()
+    to_response(Json(user_cart_list), Ok(()))
 }
 
 async fn admin_remove_product(
     Path(id): Path<i32>,
     Extension(db): Extension<Arc<DatabaseConnection>>,
-) -> impl IntoResponse {
+) -> Response {
     let txn = match db.begin().await {
         Ok(txn) => txn,
         Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": "Internal server error"
-                })),
-            );
+            return to_response(
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "error": "Internal server error"
+                    })),
+                ),
+                Err(ApiError::TransactionCreationFailed),
+            )
         }
     };
 
@@ -568,37 +661,60 @@ async fn admin_remove_product(
             let entry: cart::ActiveModel = entry.into();
             let result = entry.delete(&txn).await;
             match result {
-                Ok(_) => {
-                    let _ = txn.commit().await;
-                    (
-                        StatusCode::OK,
-                        Json(json!({
-                            "message": "Resource deleted successfully"
-                        })),
-                    )
-                }
-                Err(_) => {
+                Ok(_) => match txn.commit().await {
+                    Ok(_) => to_response(
+                        (
+                            StatusCode::OK,
+                            Json(json!({
+                                "message": "Resource deleted successfully"
+                            })),
+                        ),
+                        Ok(()),
+                    ),
+                    Err(err) => to_response(
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({
+                                "error": "Internal server error"
+                            })),
+                        ),
+                        Err(ApiError::DbError(err.to_string())),
+                    ),
+                },
+                Err(err) => {
                     let _ = txn.rollback().await;
-                    (
-                        StatusCode::BAD_REQUEST,
-                        Json(json!({
-                            "error": "Failed to delete this resource"
-                        })),
+                    to_response(
+                        (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({
+                                "error": "Failed to delete this resource"
+                            })),
+                        ),
+                        Err(ApiError::DbError(err.to_string())),
                     )
                 }
             }
         }
-        Ok(None) => (
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "error": format!("No related entry with {} id was found.", id)
-            })),
-        ),
-        Err(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({
-                "error": "Internal server error."
-            })),
+        Ok(None) => {
+            let tmp = format!("No related entry with {} id was found.", id);
+            to_response(
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "error": tmp
+                    })),
+                ),
+                Err(ApiError::General(tmp)),
+            )
+        }
+        Err(err) => to_response(
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "Internal server error."
+                })),
+            ),
+            Err(ApiError::DbError(err.to_string())),
         ),
     }
 }
@@ -607,15 +723,18 @@ async fn admin_patch_cart_entry(
     Path(id): Path<i32>,
     Extension(db): Extension<Arc<DatabaseConnection>>,
     Json(payload): Json<PatchCart>,
-) -> impl IntoResponse {
+) -> Response {
     let txn = match db.begin().await {
         Ok(txn) => txn,
         Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": "Internal server error"
-                })),
+            return to_response(
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "error": "Internal server error"
+                    })),
+                ),
+                Err(ApiError::TransactionCreationFailed),
             );
         }
     };
@@ -632,37 +751,60 @@ async fn admin_patch_cart_entry(
                 }
             };
             match result {
-                Ok(_) => {
-                    let _ = txn.commit().await;
-                    (
-                        StatusCode::OK,
-                        Json(json!({
-                            "message": "Resource patched successfully"
-                        })),
-                    )
-                }
-                Err(_) => {
+                Ok(_) => match txn.commit().await {
+                    Ok(_) => to_response(
+                        (
+                            StatusCode::OK,
+                            Json(json!({
+                                "message": "Resource patched successfully"
+                            })),
+                        ),
+                        Ok(()),
+                    ),
+                    Err(err) => to_response(
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({
+                                "error": "Internal server error"
+                            })),
+                        ),
+                        Err(ApiError::DbError(err.to_string())),
+                    ),
+                },
+                Err(err) => {
                     let _ = txn.rollback().await;
-                    (
-                        StatusCode::BAD_REQUEST,
-                        Json(json!({
-                            "error": "Failed to patch this resource"
-                        })),
+                    to_response(
+                        (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({
+                                "error": "Failed to patch this resource"
+                            })),
+                        ),
+                        Err(ApiError::DbError(err.to_string())),
                     )
                 }
             }
         }
-        Ok(None) => (
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "error": format!("No related entry with {} id was found.", id)
-            })),
-        ),
-        Err(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({
-                "error": "Internal server error."
-            })),
+        Ok(None) => {
+            let tmp = format!("No related entry with {} id was found.", id);
+            to_response(
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "error": tmp
+                    })),
+                ),
+                Err(ApiError::General(tmp)),
+            )
+        }
+        Err(err) => to_response(
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "Internal server error."
+                })),
+            ),
+            Err(ApiError::DbError(err.to_string())),
         ),
     }
 }

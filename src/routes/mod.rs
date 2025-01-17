@@ -5,7 +5,7 @@ pub mod product_routes;
 pub mod profile_routes;
 pub mod upload_routes;
 
-use axum::{Router, Extension};
+use axum::{Extension, Router};
 use sea_orm::DatabaseConnection;
 use std::sync::Arc;
 

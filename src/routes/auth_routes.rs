@@ -5,10 +5,13 @@ use argon2::{
 use axum::{
     extract::{Extension, Path, Query},
     http::StatusCode,
-    response::IntoResponse,
+    middleware,
+    response::Response,
     routing::{delete, get, post},
     Json, Router,
 };
+use once_cell::sync::Lazy;
+use regex::Regex;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, Condition, DatabaseConnection, DbErr, EntityTrait,
     FromQueryResult, QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait,
@@ -16,9 +19,13 @@ use sea_orm::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
+use validator::Validate;
 
 use crate::entities::user::{self, Entity as UserEntity, Role};
-use crate::middleware::auth::{auth_middleware, generate_token};
+use crate::middleware::{
+    auth::{auth_middleware, generate_token},
+    logging::{to_response, ApiError},
+};
 
 pub fn auth_routes() -> Router {
     Router::new()
@@ -27,45 +34,56 @@ pub fn auth_routes() -> Router {
 }
 
 pub fn admin_users_routes() -> Router {
+    //Yes, this looks like routes for ./profile_routes.rs
     Router::new()
         .route("/user", get(get_users).post(create_user))
         .route("/user/:id", delete(admin_delete_user).patch(patch_user))
-        .layer(axum::middleware::from_fn_with_state(
-            Role::Admin,
-            auth_middleware,
-        ))
+        .layer(middleware::from_fn_with_state(Role::Admin, auth_middleware))
 }
 
 // ROUTES
 async fn register_user(
     Extension(db): Extension<Arc<DatabaseConnection>>,
-    Json(payload): Json<CreateUser>,
-) -> impl IntoResponse {
-    println!(
-        "->> Called `register_user()` with payload: \n>{:?}",
-        payload.clone()
-    );
+    Json(payload): Json<RegisterUser>,
+) -> Response {
+    if let Some(err) = payload.validate().err() {
+        return to_response(
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": "Failed to validate username or password"
+                })),
+            ),
+            Err(ApiError::ValidationFail(err.to_string())),
+        );
+    }
 
     let txn = match db.begin().await {
         Ok(txn) => txn,
         Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": "Internal server error"
-                })),
-            );
+            return to_response(
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "error": "Internal server error"
+                    })),
+                ),
+                Err(ApiError::TransactionCreationFailed),
+            )
         }
     };
 
     let password = match hash_password(&payload.password) {
         Ok(password) => password,
-        Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": "An internal server error occured"
-                })),
+        Err(err) => {
+            return to_response(
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "error": "An internal server error occured"
+                    })),
+                ),
+                Err(ApiError::PasswordHashFailed(err.to_string())),
             );
         }
     };
@@ -78,41 +96,54 @@ async fn register_user(
     };
 
     match user::Entity::insert(new_user).exec(&txn).await {
-        Ok(_) => (
-            StatusCode::CREATED,
-            Json(json!({
-                "message": "User registered successfully"
-            })),
+        Ok(_) => to_response(
+            (
+                StatusCode::CREATED,
+                Json(json!({
+                    "message": "User registered successfully"
+                })),
+            ),
+            Ok(()),
         ),
-        Err(err) => {
-            println!("Error: {:?}", err);
+        Err(err) => to_response(
             (
                 StatusCode::CONFLICT,
                 Json(json!({
                     "error": "Username already exists"
                 })),
-            )
-        }
+            ),
+            Err(ApiError::DbError(err.to_string())),
+        ),
     }
 }
 
 async fn login(
     Extension(db): Extension<Arc<DatabaseConnection>>,
     Json(payload): Json<UserLogin>,
-) -> impl IntoResponse {
-    println!(
-        "->> Called `login()` with payload: \n>{:?}",
-        payload.clone()
-    );
+) -> Response {
+    if let Some(err) = payload.validate().err() {
+        return to_response(
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": "name should be at least 3 characters long"
+                })),
+            ),
+            Err(ApiError::ValidationFail(err.to_string())),
+        );
+    }
 
     let txn = match db.begin().await {
         Ok(txn) => txn,
         Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": "Internal server error"
-                })),
+            return to_response(
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "error": "Internal server error"
+                    })),
+                ),
+                Err(ApiError::TransactionCreationFailed),
             );
         }
     };
@@ -125,70 +156,100 @@ async fn login(
     match result {
         Ok(Some(model)) => match model.check_hash(&payload.password.clone()) {
             Ok(()) => match generate_token(model.id, model.role.to_string()).await {
-                Ok(token) => (
-                    StatusCode::OK,
-                    Json(json!({
-                        "token": token
-                    })),
+                Ok(token) => to_response(
+                    (
+                        StatusCode::OK,
+                        Json(json!({
+                            "token": token
+                        })),
+                    ),
+                    Ok(()),
                 ),
-                Err(_) => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({
-                        "error": "Internal server error"
-                    })),
+                Err(err) => to_response(
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({
+                            "error": "Internal server error"
+                        })),
+                    ),
+                    Err(ApiError::TokenGenerationFailed(err.to_string())),
                 ),
             },
-            Err(_) => (
+            Err(err) => to_response(
+                (
+                    StatusCode::UNAUTHORIZED,
+                    Json(json!({
+                        "error": "Invalid username or password".to_string()
+                    })),
+                ),
+                Err(ApiError::General(err)),
+            ),
+        },
+        Ok(None) => to_response(
+            (
                 StatusCode::UNAUTHORIZED,
                 Json(json!({
                     "error": "Invalid username or password".to_string()
                 })),
             ),
-        },
-        Ok(None) => (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({
-                "error": "Invalid username or password".to_string()
-            })),
+            Err(ApiError::General(
+                "Invalid username or password".to_string(),
+            )),
         ),
-        Err(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({
-                "error": "An internal server error occured".to_string()
-            })),
+        Err(err) => to_response(
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "An internal server error occured".to_string()
+                })),
+            ),
+            Err(ApiError::DbError(err.to_string())),
         ),
     }
 }
 
 async fn create_user(
     Extension(db): Extension<Arc<DatabaseConnection>>,
-    Json(payload): Json<AdminCreateUser>,
-) -> impl IntoResponse {
-    println!(
-        "->> Called `create_user()` with payload: \n>{:?}",
-        payload.clone()
-    );
+    Json(payload): Json<CreateUser>,
+) -> Response {
+    if let Some(err) = payload.validate().err() {
+        return to_response(
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": "Failed to validate username or password"
+                })),
+            ),
+            Err(ApiError::ValidationFail(err.to_string())),
+        );
+    }
 
     let txn = match db.begin().await {
         Ok(txn) => txn,
         Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": "Internal server error"
-                })),
+            return to_response(
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "error": "Internal server error"
+                    })),
+                ),
+                Err(ApiError::TransactionCreationFailed),
             );
         }
     };
 
     let password = match hash_password(&payload.password) {
         Ok(password) => password,
-        Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": "An internal server error occured"
-                })),
+        Err(err) => {
+            return to_response(
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "error": "An internal server error occured"
+                    })),
+                ),
+                Err(ApiError::PasswordHashFailed(err.to_string())),
             );
         }
     };
@@ -201,38 +262,43 @@ async fn create_user(
     };
 
     match user::Entity::insert(new_user).exec(&txn).await {
-        Ok(_) => (
-            StatusCode::CREATED,
-            Json(json!({
-                "message": "User registered successfully"
-            })),
+        Ok(_) => to_response(
+            (
+                StatusCode::CREATED,
+                Json(json!({
+                    "message": "User registered successfully"
+                })),
+            ),
+            Ok(()),
         ),
-        Err(err) => {
-            println!("Error: {:?}", err);
+        Err(err) => to_response(
             (
                 StatusCode::CONFLICT,
                 Json(json!({
                     "error": "Username already exists"
                 })),
-            )
-        }
+            ),
+            Err(ApiError::DbError(err.to_string())),
+        ),
     }
 }
 
 async fn get_users(
     Extension(db): Extension<Arc<DatabaseConnection>>,
     Query(query): Query<UsersQuery>,
-) -> impl IntoResponse {
+) -> Response {
     let txn = match db.begin().await {
         Ok(txn) => txn,
         Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": "Internal server error"
-                })),
-            )
-                .into_response();
+            return to_response(
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "error": "Internal server error"
+                    })),
+                ),
+                Err(ApiError::TransactionCreationFailed),
+            );
         }
     };
 
@@ -276,32 +342,37 @@ async fn get_users(
         .await
     {
         Ok(value) => value,
-        Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": "Internal server error"
-                })),
-            )
-                .into_response();
+        Err(err) => {
+            return to_response(
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "error": "Internal server error"
+                    })),
+                ),
+                Err(ApiError::DbError(err.to_string())),
+            );
         }
     };
 
-    Json(users).into_response()
+    to_response(Json(users), Ok(()))
 }
 
 async fn admin_delete_user(
     Path(id): Path<i32>,
     Extension(db): Extension<Arc<DatabaseConnection>>,
-) -> impl IntoResponse {
+) -> Response {
     let txn = match db.begin().await {
         Ok(txn) => txn,
         Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": "Internal server error"
-                })),
+            return to_response(
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "error": "Internal server error"
+                    })),
+                ),
+                Err(ApiError::TransactionCreationFailed),
             );
         }
     };
@@ -311,37 +382,60 @@ async fn admin_delete_user(
             let entry: user::ActiveModel = entry.into();
             let result = entry.delete(&txn).await;
             match result {
-                Ok(_) => {
-                    let _ = txn.commit().await;
-                    (
-                        StatusCode::OK,
-                        Json(json!({
-                            "message": "Resource deleted successfully"
-                        })),
-                    )
-                }
-                Err(_) => {
+                Ok(_) => match txn.commit().await {
+                    Ok(_) => to_response(
+                        (
+                            StatusCode::OK,
+                            Json(json!({
+                                "message": "Resource deleted successfully"
+                            })),
+                        ),
+                        Ok(()),
+                    ),
+                    Err(err) => to_response(
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({
+                                "error": "Internal server error"
+                            })),
+                        ),
+                        Err(ApiError::DbError(err.to_string())),
+                    ),
+                },
+                Err(err) => {
                     let _ = txn.rollback().await;
-                    (
-                        StatusCode::BAD_REQUEST,
-                        Json(json!({
-                            "error": "Failed to delete this resource"
-                        })),
+                    to_response(
+                        (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({
+                                "error": "Failed to delete this resource"
+                            })),
+                        ),
+                        Err(ApiError::DbError(err.to_string())),
                     )
                 }
             }
         }
-        Ok(None) => (
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "error": format!("No related entry with {} id was found.", id)
-            })),
-        ),
-        Err(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({
-                "error": "Internal server error."
-            })),
+        Ok(None) => {
+            let tmp = format!("No related entry with {} id was found.", id);
+            to_response(
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "error": tmp
+                    })),
+                ),
+                Err(ApiError::General(tmp)),
+            )
+        }
+        Err(err) => to_response(
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "Internal server error."
+                })),
+            ),
+            Err(ApiError::DbError(err.to_string())),
         ),
     }
 }
@@ -349,16 +443,19 @@ async fn admin_delete_user(
 async fn patch_user(
     Path(id): Path<i32>,
     Extension(db): Extension<Arc<DatabaseConnection>>,
-    Json(payload): Json<PatchUser>, //Safety ahhhh
-) -> impl IntoResponse {
+    Json(payload): Json<PatchUser>,
+) -> Response {
     let txn = match db.begin().await {
         Ok(txn) => txn,
         Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": "Internal server error"
-                })),
+            return to_response(
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "error": "Internal server error"
+                    })),
+                ),
+                Err(ApiError::TransactionCreationFailed),
             );
         }
     };
@@ -368,26 +465,25 @@ async fn patch_user(
             let mut user: user::ActiveModel = user.into();
 
             if let Some(username) = payload.username {
-                if username != "" {
-                    user.username = Set(username);
-                }
+                user.username = Set(username);
             }
 
             if let Some(password) = payload.password {
-                if password != "" {
-                    let password = match hash_password(&password) {
-                        Ok(password) => password,
-                        Err(_) => {
-                            return (
+                let password = match hash_password(&password) {
+                    Ok(password) => password,
+                    Err(err) => {
+                        return to_response(
+                            (
                                 StatusCode::INTERNAL_SERVER_ERROR,
                                 Json(json!({
                                     "error": "An internal server error occured"
                                 })),
-                            );
-                        }
-                    };
-                    user.password = Set(password);
-                }
+                            ),
+                            Err(ApiError::PasswordHashFailed(err.to_string())),
+                        );
+                    }
+                };
+                user.password = Set(password);
             }
 
             if let Some(role) = payload.role {
@@ -398,41 +494,59 @@ async fn patch_user(
 
             match result {
                 Ok(_) => match txn.commit().await {
-                    Ok(_) => (
-                        StatusCode::OK,
-                        Json(json!({
-                            "message": "Resource patched successfully"
-                        })),
+                    Ok(_) => to_response(
+                        (
+                            StatusCode::OK,
+                            Json(json!({
+                                "message": "Resource patched successfully"
+                            })),
+                        ),
+                        Ok(()),
                     ),
-                    Err(_) => (
-                        StatusCode::CONFLICT,
-                        Json(json!({
-                            "error": "Username unique constraint failed"
-                        }))
-                    )
-                }
-                Err(_) => {
+                    Err(err) => to_response(
+                        (
+                            StatusCode::CONFLICT,
+                            Json(json!({
+                                "error": "Username unique constraint failed"
+                            })),
+                        ),
+                        Err(ApiError::DbError(err.to_string())),
+                    ),
+                },
+                Err(err) => {
                     let _ = txn.rollback().await;
-                    (
-                        StatusCode::BAD_REQUEST,
-                        Json(json!({
-                            "error": "Failed to patch this resource"
-                        })),
+                    to_response(
+                        (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({
+                                "error": "Failed to patch this resource"
+                            })),
+                        ),
+                        Err(ApiError::DbError(err.to_string())),
                     )
                 }
             }
         }
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(json!({
-                "error": format!("No related entry with {} id was found.", id)
-            })),
-        ),
-        Err(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({
-                "error": "Internal server error."
-            })),
+        Ok(None) => {
+            let tmp = format!("No related entry with {} id was found.", id);
+            to_response(
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({
+                        "error": tmp
+                    })),
+                ),
+                Err(ApiError::General(tmp)),
+            )
+        }
+        Err(err) => to_response(
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "Internal server error."
+                })),
+            ),
+            Err(ApiError::DbError(err.to_string())),
         ),
     }
 }
@@ -450,34 +564,37 @@ fn hash_password(password: &str) -> Result<String, argon2::password_hash::Error>
 }
 
 //structs
-#[derive(Deserialize, Clone, Debug)]
-struct CreateUser {
+#[derive(Deserialize, Clone, Debug, Validate)]
+struct RegisterUser {
+    #[validate(regex(path = *USERNAME_REGEX))]
     username: String,
+    #[validate(regex(path = *PASSWORD_REGEX))]
     password: String,
 }
 
-#[derive(Deserialize, Clone, Debug)]
-struct AdminCreateUser {
+#[derive(Deserialize, Clone, Debug, Validate)]
+struct CreateUser {
+    #[validate(regex(path = *USERNAME_REGEX))]
     username: String,
+    #[validate(regex(path = *PASSWORD_REGEX))]
     password: String,
     role: Role,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, Validate)]
 struct UserLogin {
+    #[validate(regex(path = *USERNAME_REGEX))]
     username: String,
+    #[validate(regex(path = *PASSWORD_REGEX))]
     password: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct ResponseMessage {
-    message: String,
-}
-
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Validate)]
 struct PatchUser {
     role: Option<Role>,
+    #[validate(regex(path = *USERNAME_REGEX))]
     username: Option<String>,
+    #[validate(regex(path = *PASSWORD_REGEX))]
     password: Option<String>,
 }
 
@@ -498,3 +615,7 @@ struct UsersQuery {
     //filter zone
     role: Option<Role>, //incoming should be None, "user" or "admin"
 }
+
+pub static USERNAME_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"^[a-zA-Z0-9_]{3,25}$").unwrap());
+static PASSWORD_REGEX: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^[a-zA-Z0-9!@#$%^&*()_+]{8,15}$").unwrap());

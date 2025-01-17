@@ -11,7 +11,7 @@ async fn test_get_cart() {
     // Step 1: Authenticate and retrieve token
     let login_payload = json!({
         "username": "user",
-        "password": "12345"
+        "password": "Muzion15"
     });
 
     let login_response = client
@@ -66,7 +66,7 @@ async fn test_add_product_to_cart() {
     // Step 1: Authenticate and retrieve token
     let login_payload = json!({
         "username": "user",
-        "password": "12345"
+        "password": "Muzion15"
     });
 
     let login_response = client
@@ -130,7 +130,7 @@ async fn test_remove_product_from_cart() {
     // Step 1: Authenticate and retrieve token
     let login_payload = json!({
         "username": "user",
-        "password": "12345"
+        "password": "Muzion15"
     });
 
     let login_response = client
@@ -187,7 +187,7 @@ async fn test_patch_cart_entry() {
     // Step 1: Authenticate and retrieve token
     let login_payload = json!({
         "username": "user",
-        "password": "12345"
+        "password": "Muzion15"
     });
 
     let login_response = client

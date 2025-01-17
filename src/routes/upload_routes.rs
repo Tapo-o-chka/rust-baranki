@@ -3,10 +3,14 @@ use axum::routing::get;
 use axum::{
     extract::{Extension, Multipart, Path},
     http::{header, HeaderMap, HeaderValue, StatusCode},
-    response::IntoResponse,
+    middleware,
+    response::Response,
     routing::{patch, post},
     Json, Router,
 };
+use dotenvy::dotenv;
+use once_cell::sync::Lazy;
+use regex::Regex;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, Condition, DatabaseConnection, EntityTrait, QueryFilter, Set,
     TransactionTrait,
@@ -18,12 +22,14 @@ use std::sync::Arc;
 use tokio::fs as tokio_fs;
 use tokio_util::io::ReaderStream;
 use uuid::Uuid;
-
-const FILE_SIZE_LIMIT: usize = 8 * 1024 * 1024 * 8;
+use validator::Validate;
 
 use crate::entities::image::FileExtension;
 use crate::entities::{image, image::Entity as ImageEntity, user::Role};
-use crate::middleware::auth::auth_middleware;
+use crate::middleware::{
+    auth::auth_middleware,
+    logging::{to_response, ApiError},
+};
 
 //Routers
 pub fn public_image_router() -> Router {
@@ -34,26 +40,26 @@ pub fn upload_routes() -> Router {
     Router::new()
         .route("/image", post(upload).get(get_images))
         .route("/image/:id", patch(patch_image).delete(delete_image))
-        .layer(axum::middleware::from_fn_with_state(
-            Role::Admin,
-            auth_middleware,
-        ))
+        .layer(middleware::from_fn_with_state(Role::Admin, auth_middleware))
 }
 
 //Routes
 pub async fn print_image(
     Path(id): Path<i32>,
     Extension(db): Extension<Arc<DatabaseConnection>>,
-) -> impl IntoResponse {
+) -> Response {
     let txn = match db.begin().await {
         Ok(txn) => txn,
         Err(_) => {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": "Internal server error"
-                })),
-            ));
+            return to_response(
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "error": "Internal server error"
+                    })),
+                ),
+                Err(ApiError::TransactionCreationFailed),
+            );
         }
     };
 
@@ -62,33 +68,42 @@ pub async fn print_image(
             "./uploads/".to_owned() + &model.path_name + "." + &model.extension.to_string()
         }
         Ok(None) => {
-            println!("havent found this one");
-            return Err((
-                StatusCode::NOT_FOUND,
-                Json(json!({
-                    "error": "Not found"
-                })),
-            ));
+            let tmp = format!("Image not found with {id} id");
+            return to_response(
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({
+                        "error": tmp
+                    })),
+                ),
+                Err(ApiError::General(tmp)),
+            );
         }
-        Err(_) => {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": "Internal server error"
-                })),
-            ));
+        Err(err) => {
+            return to_response(
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "error": "Internal server error"
+                    })),
+                ),
+                Err(ApiError::DbError(err.to_string())),
+            );
         }
     };
-    println!("Will panic after that");
+
     let file = match tokio::fs::File::open(&path).await {
         Ok(file) => file,
-        Err(_) => {
-            return Err((
-                StatusCode::NOT_FOUND,
-                Json(json!({
-                    "error": "Not found"
-                })),
-            ))
+        Err(err) => {
+            return to_response(
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({
+                        "error": "Not found"
+                    })),
+                ),
+                Err(ApiError::General(err.to_string())),
+            )
         }
     };
 
@@ -110,34 +125,38 @@ pub async fn print_image(
         HeaderValue::from_static("inline"),
     );
 
-    Ok((headers, body))
+    to_response((headers, body), Ok(()))
 }
 
 async fn upload(
     Extension(db): Extension<Arc<DatabaseConnection>>,
     mut multipart: Multipart,
-) -> impl IntoResponse {
-    println!("->> Called `upload()`");
+) -> Response {
     let txn = match db.begin().await {
         Ok(txn) => txn,
         Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": "Internal server error"
-                })),
+            return to_response(
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "error": "Internal server error"
+                    })),
+                ),
+                Err(ApiError::TransactionCreationFailed),
             );
         }
     };
+
     loop {
         match multipart.next_field().await.unwrap_or(None) {
             Some(field) => {
                 let content_type = match field.content_type() {
                     Some(content_type) => content_type.to_owned(),
                     None => {
-                        return (
-                            StatusCode::BAD_REQUEST,
-                            Json(json!({"error": "Content type is not set."})),
+                        let tmp = "Content type is not set.";
+                        return to_response(
+                            (StatusCode::BAD_REQUEST, Json(json!({"error": tmp}))),
+                            Err(ApiError::General(tmp.to_string())),
                         );
                     }
                 };
@@ -145,9 +164,10 @@ async fn upload(
                 let file_extension = match allowed_content_types().get(content_type.as_str()) {
                     Some(&ext) => ext.to_owned(),
                     None => {
-                        return (
-                            StatusCode::BAD_REQUEST,
-                            Json(json!({"error": "Unsupported content type."})),
+                        let tmp = "Unsupported content type.";
+                        return to_response(
+                            (StatusCode::BAD_REQUEST, Json(json!({"error": tmp}))),
+                            Err(ApiError::General(tmp.to_string())),
                         );
                     }
                 };
@@ -155,32 +175,50 @@ async fn upload(
                 let file_name = match field.name() {
                     Some(name) => name.to_owned(),
                     None => {
-                        return (
-                            StatusCode::BAD_REQUEST,
-                            Json(json!({
-                                "error": "File name is not set."
-                            })),
+                        let tmp = "File name is not set.";
+                        return to_response(
+                            (StatusCode::BAD_REQUEST, Json(json!({"error": tmp}))),
+                            Err(ApiError::General(tmp.to_string())),
                         );
                     }
                 };
 
+                if !FILE_NAME_REGEX.is_match(&file_name) {
+                    return to_response(
+                        (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({
+                                "error": "Invalid file name. It should contain only Latin letters, numbers, '-', or '_'."
+                            })),
+                        ),
+                        Err(ApiError::General("Regex match failed".to_string())),
+                    );
+                }
+
                 let data = match field.bytes().await {
                     Ok(data) => data,
-                    Err(_) => {
-                        return (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(json!({
-                                "error": "Failed to read file bytes."
-                            })),
+                    Err(err) => {
+                        return to_response(
+                            (
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                Json(json!({
+                                    "error": "Failed to read file bytes."
+                                })),
+                            ),
+                            Err(ApiError::General(format!("Multipart error: {err}"))),
                         );
                     }
                 };
-                if data.len() > FILE_SIZE_LIMIT {
-                    return (
-                        StatusCode::PAYLOAD_TOO_LARGE,
-                        Json(json!({
-                            "error": "Payload too large."
-                        })),
+                if data.len() > get_file_size_limit() {
+                    let tmp = "Payload too large";
+                    return to_response(
+                        (
+                            StatusCode::PAYLOAD_TOO_LARGE,
+                            Json(json!({
+                                "error": tmp
+                            })),
+                        ),
+                        Err(ApiError::General(tmp.to_string())),
                     );
                 }
 
@@ -203,50 +241,64 @@ async fn upload(
                             data,
                         ) {
                             Ok(_) => match txn.commit().await {
-                                Ok(_) => (
-                                    StatusCode::CREATED,
-                                    Json(json!({
-                                        "message": "File uploaded successfully."
-                                    })),
+                                Ok(_) => to_response(
+                                    (
+                                        StatusCode::CREATED,
+                                        Json(json!({
+                                            "message": "File uploaded successfully."
+                                        })),
+                                    ),
+                                    Ok(()),
                                 ),
-                                Err(_) => (
-                                    StatusCode::INTERNAL_SERVER_ERROR,
-                                    Json(json!({
-                                        "error": "Internal server error."
-                                    })),
+                                Err(err) => to_response(
+                                    (
+                                        StatusCode::INTERNAL_SERVER_ERROR,
+                                        Json(json!({
+                                            "error": "Internal server error."
+                                        })),
+                                    ),
+                                    Err(ApiError::DbError(err.to_string())),
                                 ),
                             },
                             Err(err) => {
-                                println!("> Error: 'Failed to upload file to the server'.\n> Exactly: {:?}", err);
                                 let _ = txn.rollback().await;
-                                (
-                                    StatusCode::INTERNAL_SERVER_ERROR,
-                                    Json(json!({
-                                        "error": "Failed to upload file to the server"
-                                    })),
+                                to_response(
+                                    (
+                                        StatusCode::INTERNAL_SERVER_ERROR,
+                                        Json(json!({
+                                            "error": "Failed to upload file to the server"
+                                        })),
+                                    ),
+                                    Err(ApiError::DbError(err.to_string())),
                                 )
                             }
                         };
                     }
                     Err(err) => {
-                        println!("Error: {:?}", err);
                         let _ = txn.rollback().await;
-                        return (
-                            StatusCode::CONFLICT,
-                            Json(json!({
-                                "error": "Image already exists"
-                            })),
+                        return to_response(
+                            (
+                                StatusCode::CONFLICT,
+                                Json(json!({
+                                    "error": "Image already exists"
+                                })),
+                            ),
+                            Err(ApiError::DbError(err.to_string())),
                         );
                     }
                 }
             }
             None => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({
-                        "error": "idk what went wrong"
-                    })),
-                )
+                let tmp = "Dont know what went wrong";
+                return to_response(
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({
+                            "error": tmp
+                        })),
+                    ),
+                    Err(ApiError::General(tmp.to_string())),
+                );
             }
         }
     }
@@ -255,17 +307,19 @@ async fn upload(
 async fn get_images(
     Extension(db): Extension<Arc<DatabaseConnection>>,
     Query(query): Query<ImagesQuery>,
-) -> impl IntoResponse {
+) -> Response {
     let txn = match db.begin().await {
         Ok(txn) => txn,
         Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": "Internal server error"
-                })),
-            )
-                .into_response();
+            return to_response(
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "error": "Internal server error"
+                    })),
+                ),
+                Err(ApiError::TransactionCreationFailed),
+            );
         }
     };
 
@@ -284,14 +338,16 @@ async fn get_images(
 
     let result = ImageEntity::find().filter(filter).all(&txn).await;
     match result {
-        Ok(images) => (StatusCode::OK, Json(images)).into_response(),
-        Err(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({
-                "error": "Internal server error."
-            })),
-        )
-            .into_response(),
+        Ok(images) => to_response((StatusCode::OK, Json(images)), Ok(())),
+        Err(err) => to_response(
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "Internal server error."
+                })),
+            ),
+            Err(ApiError::DbError(err.to_string())),
+        ),
     }
 }
 
@@ -299,15 +355,30 @@ async fn patch_image(
     Path(id): Path<i32>,
     Extension(db): Extension<Arc<DatabaseConnection>>,
     Json(payload): Json<PatchImagePayload>,
-) -> impl IntoResponse {
+) -> Response {
+    if let Some(err) = payload.validate().err() {
+        return to_response(
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": "Invalid file name. It should contain only Latin letters, numbers, '-', or '_'."
+                })),
+            ),
+            Err(ApiError::ValidationFail(err.to_string())),
+        );
+    }
+
     let txn = match db.begin().await {
         Ok(txn) => txn,
         Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": "Internal server error"
-                })),
+            return to_response(
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "error": "Internal server error"
+                    })),
+                ),
+                Err(ApiError::TransactionCreationFailed),
             );
         }
     };
@@ -319,39 +390,61 @@ async fn patch_image(
             image.file_name = Set(payload.file_name);
             let result = image.update(&txn).await;
             match result {
-                Ok(new_model) => {
-                    let _ = txn.commit().await;
-                    println!("New model: {:?}", new_model);
-                    (
-                        StatusCode::OK,
-                        Json(json!({
-                            "message": "Resource patched successfully."
-                        })),
-                    )
-                }
-                Err(_) => {
+                Ok(_) => match txn.commit().await {
+                    Ok(_) => to_response(
+                        (
+                            StatusCode::OK,
+                            Json(json!({
+                                "message": "Resource patched successfully."
+                            })),
+                        ),
+                        Ok(()),
+                    ),
+                    Err(err) => to_response(
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({
+                                "error": "Internal server error"
+                            })),
+                        ),
+                        Err(ApiError::DbError(err.to_string())),
+                    ),
+                },
+                Err(err) => {
                     //DB Failed / unique constraint
                     let _ = txn.rollback().await;
-                    (
-                        StatusCode::BAD_REQUEST,
-                        Json(json!({
-                            "error": "Failed to patch this resource"
-                        })),
+                    to_response(
+                        (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({
+                                "error": "Failed to patch this resource"
+                            })),
+                        ),
+                        Err(ApiError::DbError(err.to_string())),
                     )
                 }
             }
         }
-        Ok(None) => (
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "error": format!("No image with {} id was found.", id)
-            })),
-        ),
-        Err(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({
-                "error": "Internal server error."
-            })),
+        Ok(None) => {
+            let tmp = format!("No image with {} id was found.", id);
+            to_response(
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "error": tmp
+                    })),
+                ),
+                Err(ApiError::General(tmp)),
+            )
+        }
+        Err(err) => to_response(
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "Internal server error."
+                })),
+            ),
+            Err(ApiError::DbError(err.to_string())),
         ),
     }
 }
@@ -359,18 +452,22 @@ async fn patch_image(
 async fn delete_image(
     Path(id): Path<i32>,
     Extension(db): Extension<Arc<DatabaseConnection>>,
-) -> impl IntoResponse {
+) -> Response {
     let txn = match db.begin().await {
         Ok(txn) => txn,
         Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": "Internal server error"
-                })),
-            )
+            return to_response(
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "error": "Internal server error"
+                    })),
+                ),
+                Err(ApiError::TransactionCreationFailed),
+            );
         }
     };
+
     match ImageEntity::find_by_id(id).one(&txn).await {
         Ok(Some(image)) => {
             let file_path = image.path_name.clone();
@@ -379,58 +476,85 @@ async fn delete_image(
             match image_active.delete(&txn).await {
                 Ok(_) => {
                     match tokio_fs::remove_file(format!("./uploads/{}.jpg", &file_path)).await {
-                        Ok(_) => {
-                            let _ = txn.commit().await;
-                            (
-                                StatusCode::OK,
-                                Json(json!({
-                                    "message": "Resource deleted successfully."
-                                })),
-                            )
-                        }
-                        Err(_) => {
+                        Ok(_) => match txn.commit().await {
+                            Ok(_) => to_response(
+                                (
+                                    StatusCode::OK,
+                                    Json(json!({
+                                        "message": "Resource deleted successfully."
+                                    })),
+                                ),
+                                Ok(()),
+                            ),
+                            Err(err) => to_response(
+                                (
+                                    StatusCode::INTERNAL_SERVER_ERROR,
+                                    Json(json!({
+                                        "error": "Internal server error"
+                                    })),
+                                ),
+                                Err(ApiError::DbError(err.to_string())),
+                            ),
+                        },
+                        Err(err) => {
                             let _ = txn.rollback().await;
-                            (
-                                StatusCode::BAD_REQUEST,
-                                Json(json!({
-                                    "error": "Failed to delete this resource"
-                                })),
+                            to_response(
+                                (
+                                    StatusCode::BAD_REQUEST,
+                                    Json(json!({
+                                        "error": "Failed to delete this resource"
+                                    })),
+                                ),
+                                Err(ApiError::DbError(err.to_string())),
                             )
                         }
                     }
                 }
-                Err(_) => {
+                Err(err) => {
                     let _ = txn.rollback().await;
-                    (
-                        StatusCode::BAD_REQUEST,
-                        Json(json!({
-                            "error": "Failed to delete this resource"
-                        })),
+                    to_response(
+                        (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({
+                                "error": "Failed to delete this resource"
+                            })),
+                        ),
+                        Err(ApiError::DbError(err.to_string())),
                     )
                 }
             }
         }
-        Ok(None) => (
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "error": format!("No image with id {} was found.", id)
-            })),
-        ),
-        Err(_) => {
+        Ok(None) => {
+            let tmp = format!("No image with id {} was found.", id);
+            to_response(
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "error": format!("No image with id {} was found.", id)
+                    })),
+                ),
+                Err(ApiError::General(tmp)),
+            )
+        }
+        Err(err) => {
             let _ = txn.rollback().await;
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": "Failed to fetch image from database"
-                })),
+            to_response(
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "error": "Failed to fetch image from database"
+                    })),
+                ),
+                Err(ApiError::DbError(err.to_string())),
             )
         }
     }
 }
 
 //structs
-#[derive(Deserialize)]
+#[derive(Deserialize, Validate)]
 struct PatchImagePayload {
+    #[validate(regex(path = *FILE_NAME_REGEX))]
     file_name: String,
 }
 
@@ -445,4 +569,14 @@ fn allowed_content_types() -> HashMap<&'static str, FileExtension> {
         ("image/jpeg", FileExtension::JPG),
         ("image/png", FileExtension::PNG),
     ])
+}
+
+static FILE_NAME_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"^[a-zA-Z0-9_]{3,25}$").unwrap());
+
+fn get_file_size_limit() -> usize {
+    dotenv().ok();
+    std::env::var("FILE_SIZE_LIMIT")
+        .expect("FILE_SIZE_LIMIT not found in .env file")
+        .parse::<usize>()
+        .expect("Failed to parse FILE_SIZE_LIMIT")
 }

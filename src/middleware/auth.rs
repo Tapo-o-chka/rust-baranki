@@ -1,9 +1,12 @@
 use crate::entities::user::{self, Entity as UserEntity, Role};
+use crate::middleware::logging::ApiError;
+
 use axum::{
     extract::{Request, State},
     http::StatusCode,
     middleware::Next,
-    response::Response, Extension,
+    response::Response,
+    Extension,
 };
 use chrono::{Duration, Utc};
 use dotenvy::dotenv;
@@ -18,38 +21,41 @@ pub async fn auth_middleware(
     mut req: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    println!("Loaded middleware.");
     let role = state;
 
-    println!("Loaded states.");
     let auth_header = req
         .headers()
         .get("Authorization")
         .and_then(|h| h.to_str().ok());
 
-    println!("Got to token");
     let token = match auth_header {
         Some(header) if header.starts_with("Bearer ") => match header.strip_prefix("Bearer ") {
             Some(token) => token,
             _ => {
-                println!("Token failed: \n{:?}", header);
+                req.extensions_mut().insert(ApiError::General(
+                    "Getting authorization token failed".to_string(),
+                ));
                 return Err(StatusCode::UNAUTHORIZED);
             }
         },
-        _ => return Err(StatusCode::UNAUTHORIZED),
-    };
-
-    println!("Got token");
-    let claims: Claims = match validate_token(db.clone(), token, role).await {
-        Ok(claims) => claims,
-        Err(errr) => {
-            println!("Unun {:?}", errr);
+        _ => {
+            req.extensions_mut().insert(ApiError::General(
+                "Authorization bearer is not provided".to_string(),
+            ));
             return Err(StatusCode::UNAUTHORIZED);
         }
     };
-    println!("Set claims: {:?}", claims);
+
+    let claims: Claims = match validate_token(db.clone(), token, role).await {
+        Ok(claims) => claims,
+        Err(err) => {
+            req.extensions_mut()
+                .insert(ApiError::General(err.to_string()));
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+    };
     req.extensions_mut().insert(claims);
-    println!("Gone to next");
+
     Ok(next.run(req).await)
 }
 

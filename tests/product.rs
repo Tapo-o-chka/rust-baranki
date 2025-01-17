@@ -9,7 +9,7 @@ async fn test_create_product() {
     // Step 1: Authenticate and retrieve token
     let login_payload = json!({
         "username": "admin",
-        "password": "12345"
+        "password": "Muzion15"
     });
 
     let login_response = client
@@ -78,7 +78,7 @@ async fn test_get_products() {
     // Step 1: Authenticate and retrieve token
     let login_payload = json!({
         "username": "admin",
-        "password": "12345"
+        "password": "Muzion15"
     });
 
     let login_response = client
@@ -133,7 +133,7 @@ async fn test_get_product() {
     // Step 1: Authenticate and retrieve token
     let login_payload = json!({
         "username": "admin",
-        "password": "12345"
+        "password": "Muzion15"
     });
 
     let login_response = client
@@ -189,7 +189,7 @@ async fn test_patch_product() {
     // Step 1: Authenticate and retrieve token
     let login_payload = json!({
         "username": "admin",
-        "password": "12345"
+        "password": "Muzion15"
     });
 
     let login_response = client
@@ -253,7 +253,7 @@ async fn test_delete_product() {
     // Step 1: Authenticate and retrieve token
     let login_payload = json!({
         "username": "admin",
-        "password": "12345"
+        "password": "Muzion15"
     });
 
     let login_response = client

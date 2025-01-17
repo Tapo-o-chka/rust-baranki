@@ -1,7 +1,8 @@
 use axum::{
     extract::{Extension, Path, Query},
     http::StatusCode,
-    response::IntoResponse,
+    middleware,
+    response::Response,
     routing::{get, patch, post},
     Json, Router,
 };
@@ -12,6 +13,7 @@ use sea_orm::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
+use validator::Validate;
 
 use crate::entities::{
     category, image,
@@ -19,7 +21,10 @@ use crate::entities::{
     user,
     user::Role,
 };
-use crate::middleware::auth::auth_middleware;
+use crate::middleware::{
+    auth::auth_middleware,
+    logging::{to_response, ApiError},
+};
 
 //ROUTERS
 pub fn product_routes() -> Router {
@@ -32,7 +37,7 @@ pub fn admin_product_routes() -> Router {
     Router::new()
         .route("/product", post(create_product).get(admin_get_products))
         .route("/product/:id", patch(patch_product).delete(delete_product))
-        .layer(axum::middleware::from_fn_with_state(
+        .layer(middleware::from_fn_with_state(
             Role::Admin,
             auth_middleware,
         ))
@@ -42,19 +47,30 @@ pub fn admin_product_routes() -> Router {
 async fn create_product(
     Extension(db): Extension<Arc<DatabaseConnection>>,
     Json(payload): Json<CreateProduct>,
-) -> impl IntoResponse {
-    println!(
-        "->> Called `create_product()` with payload: \n>{:?}",
-        payload.clone()
-    );
+) -> Response {
+    if let Some(err) = payload.validate().err() {
+        return to_response(
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": "Name length should be at least 3 characters"
+                })),
+            ),
+            Err(ApiError::ValidationFail(err.to_string())),
+        );
+    }
+
     let txn = match db.begin().await {
         Ok(txn) => txn,
         Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": "Internal server error"
-                })),
+            return to_response(
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "error": "Internal server error"
+                    })),
+                ),
+                Err(ApiError::TransactionCreationFailed),
             );
         }
     };
@@ -74,47 +90,62 @@ async fn create_product(
 
             match product::Entity::insert(new_product).exec(&txn).await {
                 Ok(_) => match txn.commit().await {
-                    Ok(_) => (
-                        StatusCode::CREATED,
-                        Json(json!({
-                            "message": "Product created successfully"
-                        })),
+                    Ok(_) => to_response(
+                        (
+                            StatusCode::CREATED,
+                            Json(json!({
+                                "message": "Product created successfully"
+                            })),
+                        ),
+                        Ok(()),
                     ),
-                    Err(_) => (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({
-                            "error": "Internal server error"
-                        })),
+                    Err(err) => to_response(
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({
+                                "error": "Internal server error"
+                            })),
+                        ),
+                        Err(ApiError::DbError(err.to_string())),
                     ),
                 },
                 Err(err) => {
-                    println!("Error: {:?}", err);
                     let _ = txn.rollback().await;
-                    (
-                        StatusCode::CONFLICT,
-                        Json(json!({
-                            "error": "Product already exists"
-                        })),
+                    to_response(
+                        (
+                            StatusCode::CONFLICT,
+                            Json(json!({
+                                "error": "Product already exists"
+                            })),
+                        ),
+                        Err(ApiError::DbError(err.to_string())),
                     )
                 }
             }
         }
         Ok(None) => {
             let _ = txn.rollback().await;
-            (
-                StatusCode::NOT_FOUND,
-                Json(json!({
-                    "error": format!("Image with id {} not found", payload.image_id)
-                })),
+            let tmp = format!("Image with id {} not found", payload.image_id);
+            to_response(
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({
+                        "error": tmp
+                    })),
+                ),
+                Err(ApiError::General(tmp)),
             )
         }
-        Err(_) => {
+        Err(err) => {
             let _ = txn.rollback().await;
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": "Internal server error"
-                })),
+            to_response(
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "error": "Internal server error"
+                    })),
+                ),
+                Err(ApiError::DbError(err.to_string())),
             )
         }
     }
@@ -123,17 +154,19 @@ async fn create_product(
 async fn get_products(
     Query(params): Query<GetProductsQuery>,
     Extension(db): Extension<Arc<DatabaseConnection>>,
-) -> impl IntoResponse {
+) -> Response {
     let txn = match db.begin().await {
         Ok(txn) => txn,
         Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": "Internal server error"
-                })),
-            )
-                .into_response();
+            return to_response(
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "error": "Internal server error"
+                    })),
+                ),
+                Err(ApiError::TransactionCreationFailed),
+            );
         }
     };
 
@@ -176,7 +209,8 @@ async fn get_products(
 
     //adding query
     if let Some(query) = params.query {
-        let mut query_condition = Condition::any().add(category::Column::Name.contains(query.clone()));
+        let mut query_condition =
+            Condition::any().add(category::Column::Name.contains(query.clone()));
         let id_search = query.parse::<u32>().ok();
         if let Some(id) = id_search {
             query_condition = query_condition.add(category::Column::Id.eq(id));
@@ -199,28 +233,39 @@ async fn get_products(
         .offset((page - 1) * page_size)
         .into_model::<ProductResponse>()
         .all(&txn)
-        .await
-        .unwrap_or_else(|_| vec![]);
+        .await;
 
-    Json(items).into_response()
+    match items {
+        Ok(items) => to_response(Json(items), Ok(())),
+        Err(err) => to_response(
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "Internal server error"})),
+            ),
+            Err(ApiError::DbError(err.to_string())),
+        ),
+    }
 }
 
 async fn get_product(
     Path(id): Path<i32>,
     Extension(db): Extension<Arc<DatabaseConnection>>,
-) -> impl IntoResponse {
+) -> Response {
     let txn = match db.begin().await {
         Ok(txn) => txn,
         Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": "Internal server error"
-                })),
-            )
-                .into_response();
+            return to_response(
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "error": "Internal server error"
+                    })),
+                ),
+                Err(ApiError::TransactionCreationFailed),
+            );
         }
     };
+
     let result = ProductEntity::find_by_id(id)
         .filter(product::Column::IsAvailable.eq(true))
         .join(JoinType::InnerJoin, product::Relation::Category.def())
@@ -235,38 +280,47 @@ async fn get_product(
         .await;
 
     match result {
-        Ok(Some(prod)) => (StatusCode::OK, Json(prod)).into_response(),
-        Ok(None) => (
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "error": format!("No product with {} id was found.", id)
-            })),
-        )
-            .into_response(),
-        Err(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({
-                "error": "Internal server error."
-            })),
-        )
-            .into_response(),
+        Ok(Some(prod)) => to_response((StatusCode::OK, Json(prod)), Ok(())),
+        Ok(None) => {
+            let tmp = format!("No product with {} id was found.", id);
+            to_response(
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "error": tmp
+                    })),
+                ),
+                Err(ApiError::General(tmp)),
+            )
+        }
+        Err(err) => to_response(
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "Internal server error."
+                })),
+            ),
+            Err(ApiError::DbError(err.to_string())),
+        ),
     }
 }
 
 async fn admin_get_products(
     Query(params): Query<AdminProductsQuery>,
     Extension(db): Extension<Arc<DatabaseConnection>>,
-) -> impl IntoResponse {
+) -> Response {
     let txn = match db.begin().await {
         Ok(txn) => txn,
         Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": "Internal server error"
-                })),
-            )
-                .into_response();
+            return to_response(
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "error": "Internal server error"
+                    })),
+                ),
+                Err(ApiError::TransactionCreationFailed),
+            );
         }
     };
 
@@ -316,7 +370,8 @@ async fn admin_get_products(
 
     //adding query
     if let Some(query) = params.query {
-        let mut query_condition = Condition::any().add(category::Column::Name.contains(query.clone()));
+        let mut query_condition =
+            Condition::any().add(category::Column::Name.contains(query.clone()));
         let id_search = query.parse::<u32>().ok();
         if let Some(id) = id_search {
             query_condition = query_condition.add(category::Column::Id.eq(id));
@@ -331,34 +386,58 @@ async fn admin_get_products(
         .limit(page_size)
         .offset((page - 1) * page_size)
         .all(&txn)
-        .await
-        .unwrap_or_else(|_| vec![]);
+        .await;
 
-    Json(items).into_response()
+    match items {
+        Ok(items) => to_response(Json(items), Ok(())),
+        Err(err) => to_response(
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "Internal server error"})),
+            ),
+            Err(ApiError::DbError(err.to_string())),
+        ),
+    }
 }
 
 async fn patch_product(
     Path(id): Path<i32>,
     Extension(db): Extension<Arc<DatabaseConnection>>,
     Json(payload): Json<PatchProductPayload>,
-) -> impl IntoResponse {
+) -> Response {
     let txn = match db.begin().await {
         Ok(txn) => txn,
         Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": "Internal server error"
-                })),
+            return to_response(
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "error": "Internal server error"
+                    })),
+                ),
+                Err(ApiError::TransactionCreationFailed),
             );
         }
     };
+
     let result = ProductEntity::find_by_id(id).one(&txn).await;
     match result {
         Ok(Some(product)) => {
             let mut product: product::ActiveModel = product.into();
 
-            if let Some(name) = payload.name {
+            if let Some(name) = payload.name.clone() {
+                //or just skip that, if validation fails?
+                if let Some(err) = payload.validate().err() {
+                    return to_response(
+                        (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({
+                                "error": "Name length should be at least 3 characters"
+                            })),
+                        ),
+                        Err(ApiError::ValidationFail(err.to_string())),
+                    );
+                }
                 product.name = Set(name);
             }
 
@@ -373,12 +452,15 @@ async fn patch_product(
             if let Some(image_id) = payload.image_id {
                 match image::Entity::find_by_id(image_id).one(&txn).await {
                     Ok(_) => product.image_id = Set(image_id),
-                    Err(_) => {
-                        return (
-                            StatusCode::BAD_REQUEST,
-                            Json(json!({
-                                "error": format!("No image with {image_id} id was found")
-                            })),
+                    Err(err) => {
+                        return to_response(
+                            (
+                                StatusCode::BAD_REQUEST,
+                                Json(json!({
+                                    "error": format!("No image with {image_id} id was found")
+                                })),
+                            ),
+                            Err(ApiError::DbError(err.to_string())),
                         );
                     }
                 }
@@ -387,12 +469,15 @@ async fn patch_product(
             if let Some(category_id) = payload.category_id {
                 match category::Entity::find_by_id(category_id).one(&txn).await {
                     Ok(_) => product.category_id = Set(category_id),
-                    Err(_) => {
-                        return (
-                            StatusCode::BAD_REQUEST,
-                            Json(json!({
-                                "error": format!("No category with {category_id} id was found")
-                            })),
+                    Err(err) => {
+                        return to_response(
+                            (
+                                StatusCode::BAD_REQUEST,
+                                Json(json!({
+                                    "error": format!("No category with {category_id} id was found")
+                                })),
+                            ),
+                            Err(ApiError::DbError(err.to_string())),
                         );
                     }
                 }
@@ -408,39 +493,59 @@ async fn patch_product(
 
             let result = product.update(&txn).await;
             match result {
-                Ok(new_model) => {
-                    let _ = txn.commit().await;
-                    println!("New model: {:?}", new_model);
-                    (
-                        StatusCode::OK,
-                        Json(json!({
-                            "message": "Resource patched successfully."
-                        })),
-                    )
-                }
-                Err(_) => {
+                Ok(_) => match txn.commit().await {
+                    Ok(_) => to_response(
+                        (
+                            StatusCode::OK,
+                            Json(json!({
+                                "message": "Resource patched successfully."
+                            })),
+                        ),
+                        Ok(()),
+                    ),
+                    Err(err) => to_response(
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({"error": "Internal server error"})),
+                        ),
+                        Err(ApiError::DbError(err.to_string())),
+                    ),
+                },
+                Err(err) => {
                     //DB Failed / unique constraint
                     let _ = txn.rollback().await;
-                    (
-                        StatusCode::BAD_REQUEST,
-                        Json(json!({
-                            "error": "Failed to patch this resource"
-                        })),
+                    to_response(
+                        (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({
+                                "error": "Failed to patch this resource"
+                            })),
+                        ),
+                        Err(ApiError::DbError(err.to_string())),
                     )
                 }
             }
         }
-        Ok(None) => (
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "error": format!("No image with {} id was found.", id)
-            })),
-        ),
-        Err(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({
-                "error": "Internal server error."
-            })),
+        Ok(None) => {
+            let tmp = format!("No image with {} id was found.", id);
+            to_response(
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "error": tmp
+                    })),
+                ),
+                Err(ApiError::General(tmp)),
+            )
+        }
+        Err(err) => to_response(
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "Internal server error."
+                })),
+            ),
+            Err(ApiError::DbError(err.to_string())),
         ),
     }
 }
@@ -448,63 +553,89 @@ async fn patch_product(
 async fn delete_product(
     Path(id): Path<i32>,
     Extension(db): Extension<Arc<DatabaseConnection>>,
-) -> impl IntoResponse {
+) -> Response {
     let txn = match db.begin().await {
         Ok(txn) => txn,
         Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": "Internal server error"
-                })),
-            )
+            return to_response(
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "error": "Internal server error"
+                    })),
+                ),
+                Err(ApiError::TransactionCreationFailed),
+            );
         }
     };
+
     let result = ProductEntity::find_by_id(id).one(&txn).await;
     match result {
         Ok(Some(product)) => {
             let product: product::ActiveModel = product.into();
             let result = product.delete(&txn).await;
             match result {
-                Ok(_) => {
-                    let _ = txn.commit().await;
-                    (
-                        StatusCode::OK,
-                        Json(json!({
-                            "message": "Resource deleted successfully."
-                        })),
-                    )
-                }
-                Err(_) => {
+                Ok(_) => match txn.commit().await {
+                    Ok(_) => to_response(
+                        (
+                            StatusCode::OK,
+                            Json(json!({
+                                "message": "Resource deleted successfully."
+                            })),
+                        ),
+                        Ok(()),
+                    ),
+                    Err(err) => to_response(
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({"error": "Internal server error"})),
+                        ),
+                        Err(ApiError::DbError(err.to_string())),
+                    ),
+                },
+                Err(err) => {
                     //DB Failed / unique constraint
                     let _ = txn.rollback().await;
-                    (
-                        StatusCode::BAD_REQUEST,
-                        Json(json!({
-                            "error": "Failed to delete this resource"
-                        })),
+                    to_response(
+                        (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({
+                                "error": "Failed to delete this resource"
+                            })),
+                        ),
+                        Err(ApiError::DbError(err.to_string())),
                     )
                 }
             }
         }
-        Ok(None) => (
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "error": format!("No image with {} id was found.", id)
-            })),
-        ),
-        Err(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({
-                "error": "Internal server error."
-            })),
+        Ok(None) => {
+            let tmp = format!("No image with {} id was found.", id);
+            to_response(
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "error": tmp
+                    })),
+                ),
+                Err(ApiError::General(tmp)),
+            )
+        }
+        Err(err) => to_response(
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "Internal server error."
+                })),
+            ),
+            Err(ApiError::DbError(err.to_string())),
         ),
     }
 }
 
 //Structs
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Deserialize, Clone, Debug, Validate)]
 struct CreateProduct {
+    #[validate(length(min = 3))]
     name: String,
     price: f32,
     description: String,
@@ -549,8 +680,9 @@ struct AdminProductsQuery {
     page_size: Option<u64>, //required by sea_orm to be u64, why? trait into u64 or something
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Validate)]
 struct PatchProductPayload {
+    #[validate(length(min = 3))]
     name: Option<String>,
     price: Option<f32>,
     description: Option<String>,

@@ -8,7 +8,7 @@ async fn test_category() {
 
     let payload = serde_json::json!({
         "username": "user",
-        "password": "Muzion15"
+        "password": "Secret15"
     });
 
     let response = client
@@ -56,7 +56,7 @@ async fn test_get_category() {
 
     let payload = serde_json::json!({
         "username": "user",
-        "password": "Muzion15"
+        "password": "Secret15"
     });
     
     let response = client
@@ -102,7 +102,7 @@ async fn test_create_category() {
 
     let payload = serde_json::json!({
         "username": "admin",
-        "password": "Muzion15"
+        "password": "Secret15"
     });
     
     let response = client
@@ -168,7 +168,7 @@ async fn test_patch_category() {
 
     let payload = serde_json::json!({
         "username": "admin",
-        "password": "Muzion15"
+        "password": "Secret15"
     });
     
     let response = client
@@ -260,7 +260,7 @@ async fn test_delete_category() {
 
     let payload = serde_json::json!({
         "username": "admin",
-        "password": "Muzion15"
+        "password": "Secret15"
     });
     
     let response = client

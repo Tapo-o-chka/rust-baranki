@@ -33,3 +33,15 @@ pub enum Relation {
 
 
 impl ActiveModelBehavior for ActiveModel {}
+
+impl Related<crate::entities::user::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::User.def()
+    }
+}
+
+impl Related<crate::entities::product::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::Product.def()
+    }
+}

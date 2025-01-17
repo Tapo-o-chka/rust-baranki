@@ -38,3 +38,15 @@ pub enum Relation {
 }
 
 impl ActiveModelBehavior for ActiveModel {}
+
+impl Related<crate::entities::category::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::Category.def()
+    }
+}
+
+impl Related<crate::entities::image::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::Image.def()
+    }
+}

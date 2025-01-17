@@ -3,7 +3,8 @@ pub mod product;
 pub mod cart;
 pub mod category;
 pub mod image;
-//pub mod roles; 
+pub mod order;
+pub mod order_part;
 
 use argon2::{
     password_hash::{rand_core::OsRng, PasswordHasher, SaltString},
@@ -16,7 +17,7 @@ use crate::entities::{
     category::Entity as Category,
     user::Entity as User,
     product::Entity as Product,
-    image::Entity as Picture,
+    image::Entity as Image,
 };
 
 pub async fn setup_schema(db: &DatabaseConnection) {
@@ -25,7 +26,7 @@ pub async fn setup_schema(db: &DatabaseConnection) {
     let create_category_table = schema.create_table_from_entity(Category);
     let create_user_table = schema.create_table_from_entity(User);
     let create_product_table = schema.create_table_from_entity(Product);
-    let create_picture_table = schema.create_table_from_entity(Picture);
+    let create_image_table = schema.create_table_from_entity(Image);
 
     db.execute(db.get_database_backend().build(&create_cart_table))
         .await
@@ -39,16 +40,16 @@ pub async fn setup_schema(db: &DatabaseConnection) {
     db.execute(db.get_database_backend().build(&create_product_table))
         .await
         .expect("Failed to create product schema");
-    db.execute(db.get_database_backend().build(&create_picture_table))
+    db.execute(db.get_database_backend().build(&create_image_table))
         .await
-        .expect("Failed to create picture schema");
+        .expect("Failed to create image schema");
 }
 
 pub async fn primary_settup(db: Arc<DatabaseConnection>){
     let salt = SaltString::generate(&mut OsRng);
     let argon2 = Argon2::default();
     let password_hash = argon2
-        .hash_password("Muzion15".as_bytes(), &salt)
+        .hash_password("Secret15".as_bytes(), &salt)
         .expect("Failed to hash password")
         .to_string();
 

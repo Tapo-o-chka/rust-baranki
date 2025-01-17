@@ -24,7 +24,7 @@ async fn test_create_user() {
 
     let payload = serde_json::json!({
         "username": "JohnDoe",
-        "password": "Muzion15"
+        "password": "Secret15"
     });
 
     let response = client
@@ -48,7 +48,7 @@ async fn test_login() {
 
     let payload = serde_json::json!({
         "username": "user",
-        "password": "Muzion15"
+        "password": "Secret15"
     });
 
     let response = client

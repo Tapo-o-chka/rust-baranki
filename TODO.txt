@@ -1,6 +1,4 @@
-Loging middleware
-refactor code
 write tests
-refactor tests
-Rate limits
 Orders
+Rate limits
+Caching; Smart caching;
